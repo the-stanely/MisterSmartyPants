@@ -1,0 +1,10 @@
+ddgs
+accelerate
+mcp
+python-dotenv
+requests
+rich
+sentence-transformers
+torch
+trafilatura
+transformers
