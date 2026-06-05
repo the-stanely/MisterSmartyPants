@@ -1106,7 +1106,7 @@ def answer_from_results(user_prompt: str, tool_json: str, history: list[dict[str
     search_data = format_search_data_for_prompt(tool_json)
     messages = [
         {
-            "role": "system",
+            "role": "user",
             "content": (
                 f"{expand_prompt_placeholders(ANSWER_FROM_RESULTS_PROMPT)} "
                 f"{expand_prompt_placeholders(ANSWER_FROM_RESULTS_EXTRA_SYSTEM_PROMPT)}"
@@ -1117,7 +1117,7 @@ def answer_from_results(user_prompt: str, tool_json: str, history: list[dict[str
     messages.append({"role": "user", "content": user_prompt})
     messages.append(
         {
-            "role": "web_search_results",
+            "role": "user",
             "content": search_data,
         }
     )
