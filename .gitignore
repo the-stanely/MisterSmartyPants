@@ -1,5 +1,7 @@
-.venv/
+﻿.venv/
 __pycache__/
 *.pyc
 .env
-vscode-backup/.vscode/settings.json
+vscode-backup/
+.huggingface/
+*.log

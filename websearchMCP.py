@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import hashlib
@@ -61,6 +62,8 @@ DEBUG = False
 PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
 LLM_ENABLED = os.getenv("LLM_ENABLED", "1") == "1"
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1") == "1"
+PROMPT_DEBUG_CONTEXT: ContextVar[bool] = ContextVar("PROMPT_DEBUG_CONTEXT", default=PROMPT_DEBUG)
+LLM_ENABLED_CONTEXT: ContextVar[bool] = ContextVar("LLM_ENABLED_CONTEXT", default=LLM_ENABLED)
 SEARCH_DECIDER = os.getenv("SEARCH_DECIDER", "python").strip().lower()
 DECIDER_MODEL = os.getenv(
     "DECIDER_MODEL",
@@ -187,9 +190,20 @@ class LlmSkipped(RuntimeError):
     pass
 
 
-def print_assistant_answer(answer: str) -> None:
+def prompt_debug_enabled() -> bool:
+    return PROMPT_DEBUG_CONTEXT.get()
+
+
+def llm_enabled() -> bool:
+    return LLM_ENABLED_CONTEXT.get()
+
+
+def print_assistant_answer(answer: str, rich_output: bool = True) -> None:
     print("[Assistant]")
-    console.print(Markdown(answer))
+    if rich_output:
+        Console(file=sys.stdout).print(Markdown(answer))
+    else:
+        print(answer)
     print()
 
 
@@ -230,7 +244,7 @@ def compact_text(text: str, max_chars: int) -> str:
         if not compacted.endswith("[TRUNCATED]"):
             compacted = f"{compacted} [TRUNCATED]"
 
-    if compacted and not re.search(r'(\.|\!|\?|\[TRUNCATED\]|[\"”\']\s*)$', compacted):
+    if compacted and not re.search(r'(\.|\!|\?|\[TRUNCATED\]|["\']\s*)$', compacted):
         compacted = f"{compacted} [TRUNCATED]"
     if compacted and not compacted.endswith("[END EXCERPT]"):
         compacted = f"{compacted} [END EXCERPT]"
@@ -576,7 +590,7 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
                 page["relevance_score"] = f"{relevance_score:.3f}"
                 page["relevance_threshold"] = f"{RELEVANCY_THRESHOLD:.3f}"
                 page["relevance_model"] = RELEVANCY_MODEL
-                if PROMPT_DEBUG:
+                if prompt_debug_enabled():
                     print(f"[Relevance input begin: {len(relevance_excerpt)} chars]")
                     print(f"Query: {query}")
                     print()
@@ -691,9 +705,9 @@ def print_prompt_debug(messages: list[dict[str, str]], serialized: str, model: s
 
 def chat_once(messages: list[dict[str, str]], model: str = OLLAMA_MODEL) -> str:
     serialized_messages = validate_llm_messages(messages)
-    if PROMPT_DEBUG:
+    if prompt_debug_enabled():
         print_prompt_debug(messages, serialized_messages, model)
-    if not LLM_ENABLED:
+    if not llm_enabled():
         raise LlmSkipped("LLM disabled.")
     payload = {
         "model": model,
@@ -895,7 +909,7 @@ def decide_with_qwen(user_prompt: str, history: list[dict[str, str]]) -> tuple[b
     ]
     messages.append({"role": "user", "content": format_decider_user_content(user_prompt)})
 
-    if PROMPT_DEBUG:
+    if prompt_debug_enabled():
         serialized = json.dumps(messages, ensure_ascii=False, indent=2)
         print(f"[Decider prompt begin: {len(serialized)} chars, model={DECIDER_MODEL}]")
         for index, message in enumerate(messages, start=1):
@@ -1162,37 +1176,37 @@ def print_commands() -> None:
     print()
 
 
-def main():
-    global LLM_ENABLED, PROMPT_DEBUG, SEARCH_ENABLED
+class ChatSession:
+    def __init__(self, rich_output: bool = True) -> None:
+        self.history: list[dict[str, str]] = []
+        self.rich_output = rich_output
+        self.prompt_debug = PROMPT_DEBUG
+        self.llm_enabled = LLM_ENABLED
+        self.search_enabled = SEARCH_ENABLED
+        self.search_limit = SEARCH_LIMIT
+        self.fetch_top_n = FETCH_TOP_N
+        self.fetch_scan_limit = FETCH_SCAN_LIMIT
+        self.fetch_max_chars = FETCH_MAX_CHARS
 
-    args = parse_args()
-    search_limit = SEARCH_LIMIT
-    fetch_top_n = FETCH_TOP_N
-    fetch_scan_limit = FETCH_SCAN_LIMIT
-    fetch_max_chars = FETCH_MAX_CHARS
+    def _set_context(self) -> tuple[Any, Any]:
+        prompt_token = PROMPT_DEBUG_CONTEXT.set(self.prompt_debug)
+        llm_token = LLM_ENABLED_CONTEXT.set(self.llm_enabled)
+        return prompt_token, llm_token
 
-    history: list[dict[str, str]] = []
+    def _reset_context(self, tokens: tuple[Any, Any]) -> None:
+        prompt_token, llm_token = tokens
+        PROMPT_DEBUG_CONTEXT.reset(prompt_token)
+        LLM_ENABLED_CONTEXT.reset(llm_token)
 
-    if SEARCH_DECIDER == "qwen":
-        raise ValueError("SEARCH_DECIDER=qwen is obsolete. Use SEARCH_DECIDER=python.")
-    if SEARCH_DECIDER == "python":
-        preload_start = time.perf_counter()
-        get_qwen_decider()
-        preload_ms = (time.perf_counter() - preload_start) * 1000
-        print(f"[Decider preload: {preload_ms:.0f} ms]")
-    if SUMMARIZE_EXCERPTS_WITH_DECIDER:
-        preload_start = time.perf_counter()
-        get_python_model(SUMMARY_MODEL)
-        preload_ms = (time.perf_counter() - preload_start) * 1000
-        print(f"[Summary preload: {preload_ms:.0f} ms]")
-    if DECIDER_RELEVANCE_ENABLED:
-        preload_start = time.perf_counter()
-        get_relevancy_model()
-        preload_ms = (time.perf_counter() - preload_start) * 1000
-        print(f"[Relevancy preload: {preload_ms:.0f} ms]")
+    def run_query(self, query: str) -> None:
+        tokens = self._set_context()
+        try:
+            self._run_query(query)
+        finally:
+            self._reset_context(tokens)
 
-    def run_query(query: str):
-        if not SEARCH_ENABLED:
+    def _run_query(self, query: str) -> None:
+        if not self.search_enabled:
             llm_start = time.perf_counter()
             try:
                 answer = answer_direct(query)
@@ -1211,13 +1225,13 @@ def main():
                 return
             llm_ms = (time.perf_counter() - llm_start) * 1000
             print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
-            print_assistant_answer(answer)
+            print_assistant_answer(answer, self.rich_output)
             return
 
         marker = forced_search_marker(query)
         will_run_decider = SEARCH_DECIDER in {"python", "ollama"} and marker is None
         decider_start = time.perf_counter()
-        should_search, decision_reason, search_query = decide_search_action(query, history)
+        should_search, decision_reason, search_query = decide_search_action(query, self.history)
         decider_ms = (time.perf_counter() - decider_start) * 1000
         if will_run_decider:
             print(format_decider_elapsed(decider_ms))
@@ -1227,7 +1241,7 @@ def main():
         if not should_search:
             llm_start = time.perf_counter()
             try:
-                answer = answer_from_memory(query, history)
+                answer = answer_from_memory(query, self.history)
             except LlmSkipped:
                 llm_ms = (time.perf_counter() - llm_start) * 1000
                 print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
@@ -1243,14 +1257,14 @@ def main():
                 return
             llm_ms = (time.perf_counter() - llm_start) * 1000
             print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
-            print_assistant_answer(answer)
-            history.append({"role": "user", "content": query})
-            history.append({"role": "assistant", "content": answer})
+            print_assistant_answer(answer, self.rich_output)
+            self.history.append({"role": "user", "content": query})
+            self.history.append({"role": "assistant", "content": answer})
             return
 
         if not search_query:
             try:
-                search_query = derive_search_query(query, history)
+                search_query = derive_search_query(query, self.history)
             except LlmSkipped:
                 search_query = query
             except Exception as exc:
@@ -1262,10 +1276,10 @@ def main():
         search_start = time.perf_counter()
         result = run_search(
             query=search_query,
-            search_limit=search_limit,
-            fetch_top_n=fetch_top_n,
-            fetch_scan_limit=fetch_scan_limit,
-            fetch_max_chars=fetch_max_chars,
+            search_limit=self.search_limit,
+            fetch_top_n=self.fetch_top_n,
+            fetch_scan_limit=self.fetch_scan_limit,
+            fetch_max_chars=self.fetch_max_chars,
         )
         search_ms = (time.perf_counter() - search_start) * 1000
         print(f"[Search: {search_ms:.0f} ms, {len(result):.0f} chars]")
@@ -1283,7 +1297,7 @@ def main():
 
         llm_start = time.perf_counter()
         try:
-            answer = answer_from_results(query, result, history)
+            answer = answer_from_results(query, result, self.history)
         except LlmSkipped:
             llm_ms = (time.perf_counter() - llm_start) * 1000
             print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
@@ -1300,9 +1314,107 @@ def main():
 
         llm_ms = (time.perf_counter() - llm_start) * 1000
         print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
-        print_assistant_answer(answer)
-        history.append({"role": "user", "content": query})
-        history.append({"role": "assistant", "content": answer})
+        print_assistant_answer(answer, self.rich_output)
+        self.history.append({"role": "user", "content": query})
+        self.history.append({"role": "assistant", "content": answer})
+
+    def handle_input(self, user_query: str) -> bool:
+        if not user_query:
+            return True
+        if user_query == "/?":
+            print_commands()
+            return True
+        if user_query.lower() == "/new":
+            self.history.clear()
+            print("[System] Context cleared.")
+            print()
+            return True
+        if user_query.lower() == "/prompt-on":
+            self.prompt_debug = True
+            print("[System] Prompt display enabled.")
+            print()
+            return True
+        if user_query.lower() == "/prompt-off":
+            self.prompt_debug = False
+            print("[System] Prompt display disabled.")
+            print()
+            return True
+        if user_query.lower() == "/llm-off":
+            self.llm_enabled = False
+            print("[System] Final LLM answer disabled.")
+            print()
+            return True
+        if user_query.lower() == "/llm-on":
+            self.llm_enabled = True
+            print("[System] Final LLM answer enabled.")
+            print()
+            return True
+        if user_query.lower() == "/search-off":
+            self.search_enabled = False
+            print("[System] Search disabled. Prompts will be sent directly to the LLM.")
+            print()
+            return True
+        if user_query.lower() == "/search-on":
+            self.search_enabled = True
+            print("[System] Search enabled.")
+            print()
+            return True
+        if user_query.lower().startswith("/decider"):
+            decider_prompt = user_query[len("/decider"):].strip()
+            if not decider_prompt:
+                print("[System] Usage: /decider <prompt>")
+                print()
+                return True
+            tokens = self._set_context()
+            try:
+                start = time.perf_counter()
+                should_search, reason, search_query = decide_with_qwen(decider_prompt, self.history)
+                decider_ms = (time.perf_counter() - start) * 1000
+            finally:
+                self._reset_context(tokens)
+            decision = "SEARCH" if should_search else "ANSWER"
+            print(format_decider_elapsed(decider_ms))
+            print(f"{decision} | {reason}")
+            if search_query:
+                print(f"query: {search_query}")
+            print()
+            return True
+        if user_query.lower() in {"quit", "exit", "q"}:
+            print("Exiting.")
+            return False
+        if user_query.startswith("/"):
+            print(f"[System] Unknown command: {user_query}")
+            print_commands()
+            return True
+
+        self.run_query(user_query)
+        return True
+
+
+def preload_models() -> None:
+    if SEARCH_DECIDER == "qwen":
+        raise ValueError("SEARCH_DECIDER=qwen is obsolete. Use SEARCH_DECIDER=python.")
+    if SEARCH_DECIDER == "python":
+        preload_start = time.perf_counter()
+        get_qwen_decider()
+        preload_ms = (time.perf_counter() - preload_start) * 1000
+        print(f"[Decider preload: {preload_ms:.0f} ms]")
+    if SUMMARIZE_EXCERPTS_WITH_DECIDER:
+        preload_start = time.perf_counter()
+        get_python_model(SUMMARY_MODEL)
+        preload_ms = (time.perf_counter() - preload_start) * 1000
+        print(f"[Summary preload: {preload_ms:.0f} ms]")
+    if DECIDER_RELEVANCE_ENABLED:
+        preload_start = time.perf_counter()
+        get_relevancy_model()
+        preload_ms = (time.perf_counter() - preload_start) * 1000
+        print(f"[Relevancy preload: {preload_ms:.0f} ms]")
+
+
+def main():
+    args = parse_args()
+    preload_models()
+    session = ChatSession()
 
     initial_query = (" ".join(args.query).strip() if args.query else "")
     if args.once:
@@ -1311,7 +1423,7 @@ def main():
         if not initial_query:
             print("QUESTION is empty.")
             raise SystemExit(1)
-        run_query(initial_query)
+        session.run_query(initial_query)
         raise SystemExit(0)
 
     while True:
@@ -1320,73 +1432,11 @@ def main():
         except (EOFError, KeyboardInterrupt):
             print("\nExiting.")
             break
-
-        if not user_query:
-            continue
-        if user_query == "/?":
-            print_commands()
-            continue
-        if user_query.lower() == "/new":
-            history.clear()
-            print("[System] Context cleared.")
-            print()
-            continue
-        if user_query.lower() == "/prompt-on":
-            PROMPT_DEBUG = True
-            print("[System] Prompt display enabled.")
-            print()
-            continue
-        if user_query.lower() == "/prompt-off":
-            PROMPT_DEBUG = False
-            print("[System] Prompt display disabled.")
-            print()
-            continue
-        if user_query.lower() == "/llm-off":
-            LLM_ENABLED = False
-            print("[System] Final LLM answer disabled.")
-            print()
-            continue
-        if user_query.lower() == "/llm-on":
-            LLM_ENABLED = True
-            print("[System] Final LLM answer enabled.")
-            print()
-            continue
-        if user_query.lower() == "/search-off":
-            SEARCH_ENABLED = False
-            print("[System] Search disabled. Prompts will be sent directly to the LLM.")
-            print()
-            continue
-        if user_query.lower() == "/search-on":
-            SEARCH_ENABLED = True
-            print("[System] Search enabled.")
-            print()
-            continue
-        if user_query.lower().startswith("/decider"):
-            decider_prompt = user_query[len("/decider"):].strip()
-            if not decider_prompt:
-                print("[System] Usage: /decider <prompt>")
-                print()
-                continue
-            start = time.perf_counter()
-            should_search, reason, search_query = decide_with_qwen(decider_prompt, history)
-            decider_ms = (time.perf_counter() - start) * 1000
-            decision = "SEARCH" if should_search else "ANSWER"
-            print(format_decider_elapsed(decider_ms))
-            print(f"{decision} | {reason}")
-            if search_query:
-                print(f"query: {search_query}")
-            print()
-            continue
-        if user_query.lower() in {"quit", "exit", "q"}:
-            print("Exiting.")
+        if not session.handle_input(user_query):
             break
-        if user_query.startswith("/"):
-            print(f"[System] Unknown command: {user_query}")
-            print_commands()
-            continue
-
-        run_query(user_query)
 
 
 if __name__ == "__main__":
     main()
+
+

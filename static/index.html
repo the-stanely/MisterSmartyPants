@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MisterSmartyPants</title>
+  <style>
+    :root { color-scheme: light dark; font-family: Consolas, ui-monospace, SFMono-Regular, Menlo, monospace; }
+    body { margin: 0; background: #101214; color: #e8e8e8; }
+    main { max-width: 980px; margin: 0 auto; min-height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+    header { padding: 16px 18px; border-bottom: 1px solid #2b3035; }
+    h1 { margin: 0; font-size: 20px; font-weight: 650; }
+    #log { padding: 16px 18px; overflow: auto; white-space: pre-wrap; line-height: 1.45; }
+    .turn { margin: 0 0 18px; }
+    .user { color: #9fd3ff; }
+    .output { color: #e8e8e8; }
+    form { display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid #2b3035; }
+    textarea { flex: 1; min-height: 84px; max-height: 180px; resize: vertical; border: 1px solid #3b424a; border-radius: 6px; padding: 10px; background: #171a1d; color: #f4f4f4; font: inherit; }
+    button { border: 1px solid #3b424a; border-radius: 6px; padding: 0 16px; background: #2563eb; color: white; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>MisterSmartyPants</h1></header>
+    <section id="log" aria-live="polite"></section>
+    <form id="chat-form">
+      <textarea id="message" placeholder="Ask something or use /?" autofocus></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </main>
+  <script>
+    const form = document.getElementById('chat-form');
+    const message = document.getElementById('message');
+    const log = document.getElementById('log');
+    const send = document.getElementById('send');
+
+    function appendTurn(input, output) {
+      const block = document.createElement('div');
+      block.className = 'turn';
+      block.innerHTML = `<div class="user">AI ready&gt; ${escapeHtml(input)}</div><div class="output">${escapeHtml(output)}</div>`;
+      log.appendChild(block);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function escapeHtml(text) {
+      return text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    }
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const text = message.value.trim();
+      if (!text) return;
+      message.value = '';
+      send.disabled = true;
+      appendTurn(text, '[working...]');
+      const current = log.lastElementChild.querySelector('.output');
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({message: text})
+        });
+        const data = await res.json();
+        current.textContent = data.output || '';
+      } catch (err) {
+        current.textContent = String(err);
+      } finally {
+        send.disabled = false;
+        message.focus();
+      }
+    });
+
+    message.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+  </script>
+</body>
+</html>

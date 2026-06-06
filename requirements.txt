@@ -8,3 +8,5 @@ sentence-transformers
 torch
 trafilatura
 transformers
+fastapi
+uvicorn
