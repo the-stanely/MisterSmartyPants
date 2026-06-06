@@ -72,6 +72,13 @@ def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(
     _, session = get_session(msp_session, response)
     buffer = io.StringIO()
     with chat_lock:
-        with redirect_stdout(buffer), redirect_stderr(buffer):
-            session.handle_input(message)
+        try:
+            with redirect_stdout(buffer), redirect_stderr(buffer):
+                session.handle_input(message)
+        except Exception as exc:
+            output = buffer.getvalue()
+            if output and not output.endswith("\n"):
+                output += "\n"
+            output += f"[Server error] {type(exc).__name__}: {exc}\n"
+            return JSONResponse({"output": output, "error": str(exc)}, status_code=200)
     return JSONResponse({"output": buffer.getvalue()})

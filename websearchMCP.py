@@ -1274,13 +1274,21 @@ class ChatSession:
                 return
 
         search_start = time.perf_counter()
-        result = run_search(
-            query=search_query,
-            search_limit=self.search_limit,
-            fetch_top_n=self.fetch_top_n,
-            fetch_scan_limit=self.fetch_scan_limit,
-            fetch_max_chars=self.fetch_max_chars,
-        )
+        try:
+            result = run_search(
+                query=search_query,
+                search_limit=self.search_limit,
+                fetch_top_n=self.fetch_top_n,
+                fetch_scan_limit=self.fetch_scan_limit,
+                fetch_max_chars=self.fetch_max_chars,
+            )
+        except Exception as exc:
+            search_ms = (time.perf_counter() - search_start) * 1000
+            print(f"[Search: {search_ms:.0f} ms, failed]")
+            print("[Assistant]")
+            print(f"Search failed: {exc}")
+            print()
+            return
         search_ms = (time.perf_counter() - search_start) * 1000
         print(f"[Search: {search_ms:.0f} ms, {len(result):.0f} chars]")
 

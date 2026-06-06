@@ -61,8 +61,13 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({message: text})
         });
-        const data = await res.json();
-        current.textContent = data.output || '';
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const data = await res.json();
+          current.textContent = data.output || data.error || '';
+        } else {
+          current.textContent = await res.text();
+        }
       } catch (err) {
         current.textContent = String(err);
       } finally {
