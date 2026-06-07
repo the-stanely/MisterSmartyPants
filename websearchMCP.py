@@ -43,6 +43,9 @@ OLLAMA_NUM_THREAD_RAW = os.getenv("OLLAMA_NUM_THREAD", "").strip()
 OLLAMA_NUM_THREAD = int(OLLAMA_NUM_THREAD_RAW) if OLLAMA_NUM_THREAD_RAW else None
 QUESTION = os.getenv("QUESTION", "Wall street biggest movers.")
 SEARCH_LIMIT = 12
+SEARCH_NEWS_LIMIT = read_positive_int_env("SEARCH_NEWS_LIMIT", "10")
+SEARCH_TEXT_LIMIT = read_positive_int_env("SEARCH_TEXT_LIMIT", "50")
+FETCH_SURVIVOR_N = read_positive_int_env("FETCH_SURVIVOR_N", "20")
 FETCH_TOP_N = read_positive_int_env("FETCH_TOP_N", "5")
 FETCH_MAX_CHARS = int(os.getenv("FETCH_MAX_CHARS", "3000"))
 FETCH_SCAN_LIMIT = read_positive_int_env("FETCH_SCAN_LIMIT", "20")
@@ -331,7 +334,7 @@ def asks_for_current_info(query: str) -> bool:
 def has_stale_year_marker(query: str, item: dict[str, str]) -> bool:
     current_year = datetime.now().year
     requested_years = {int(year) for year in re.findall(r"\b(20\d{2})\b", query)}
-    haystack = " ".join([item.get("title", ""), item.get("snippet", ""), item.get("url", "")])
+    haystack = " ".join([item.get("title", ""), item.get("snippet", ""), item.get("url", ""), item.get("published", "")])
     for year_text in re.findall(r"\b(20\d{2})\b", haystack):
         year = int(year_text)
         if year in requested_years:
@@ -430,9 +433,9 @@ def extract_article_content(html: str, url: str, max_chars: int) -> dict[str, st
             output_format="json",
             with_metadata=True,
             include_comments=False,
-            include_tables=False,
+            include_tables=True,
             deduplicate=True,
-            favor_precision=True,
+            favor_recall=True,
         )
     except Exception as exc:
         return {"url": url, "title": fallback_title, "content": f"Fetch error: trafilatura extraction failed: {exc}"}
@@ -445,12 +448,10 @@ def extract_article_content(html: str, url: str, max_chars: int) -> dict[str, st
     except json.JSONDecodeError as exc:
         return {"url": url, "title": fallback_title, "content": f"Fetch error: trafilatura returned invalid JSON: {exc}"}
 
-    text, extracted_chars, was_truncated = compact_text_with_metadata(
-        str(obj.get("text") or obj.get("raw_text") or ""),
-        max_chars,
-    )
-    if not text:
+    normalized = re.sub(r"\s+", " ", str(obj.get("text") or obj.get("raw_text") or "")).strip()
+    if not normalized:
         return {"url": url, "title": str(obj.get("title") or fallback_title), "content": "Fetch error: trafilatura returned empty text"}
+    text = normalized if normalized.endswith("[END EXCERPT]") else f"{normalized} [END EXCERPT]"
 
     return {
         "url": url,
@@ -459,11 +460,10 @@ def extract_article_content(html: str, url: str, max_chars: int) -> dict[str, st
         "published": str(obj.get("date") or ""),
         "content": text,
         "extractor": "trafilatura",
-        "extracted_chars": str(extracted_chars),
+        "extracted_chars": str(len(normalized)),
         "content_chars": str(len(text)),
-        "truncated": str(was_truncated).lower(),
+        "truncated": "false",
     }
-
 
 def fetch_url_content(url: str, max_chars: int) -> dict[str, str]:
     headers = {
@@ -491,18 +491,95 @@ def fetch_url_content(url: str, max_chars: int) -> dict[str, str]:
         return {"url": url, "title": url, "content": f"Fetch error: {exc}"}
 
 
+def search_item_relevance_text(item: dict[str, str]) -> str:
+    lines = [
+        f"Mode: {item.get('search_mode', '')}",
+        f"Title: {item.get('title', '')}",
+        f"URL: {item.get('url', '')}",
+    ]
+    published = str(item.get("published") or "").strip()
+    if published:
+        lines.append(f"Published: {published}")
+    snippet = str(item.get("snippet") or "").strip()
+    if snippet:
+        lines.extend(["", "Snippet:", snippet])
+    return "\n".join(lines)
+
+
+def score_search_items(query: str, search_items: list[dict[str, str]]) -> list[dict[str, str]]:
+    if not search_items or not DECIDER_RELEVANCE_ENABLED:
+        return search_items
+    model = get_relevancy_model()
+    pairs = [(query, search_item_relevance_text(item)) for item in search_items]
+    scores = model.predict(pairs)
+    ranked: list[dict[str, str]] = []
+    for item, score in zip(search_items, scores):
+        ranked_item = dict(item)
+        ranked_item["initial_relevance_score"] = f"{float(score):.3f}"
+        ranked.append(ranked_item)
+    return sorted(ranked, key=lambda item: float(item.get("initial_relevance_score", "0")), reverse=True)
+
+
+def post_fetch_reject_reason(query: str, item: dict[str, str], page: dict[str, str]) -> str | None:
+    content = str(page.get("content") or "")
+    if content.startswith("Fetch error:"):
+        return content
+    ok, reason = fetched_page_quality(page)
+    if not ok:
+        return reason
+    url = str(page.get("url") or item.get("url") or "")
+    if is_probable_ad_url(url):
+        return "probable ad/tracking URL after redirect"
+    if is_root_homepage_url(url):
+        return "root homepage URL after redirect"
+    stale_item = {
+        "title": str(page.get("title") or item.get("title") or ""),
+        "url": url,
+        "snippet": content,
+        "published": str(page.get("published") or item.get("published") or ""),
+    }
+    if asks_for_current_info(query) and has_stale_year_marker(query, stale_item):
+        return "stale year marker after extraction"
+    if asks_for_current_info(query) and "youtube.com" in url.lower():
+        return "YouTube result for current-info query"
+    return None
+
+
+def score_fetched_pages(query: str, pages: list[dict[str, str]]) -> list[dict[str, str]]:
+    if not pages or not DECIDER_RELEVANCE_ENABLED:
+        return pages
+    model = get_relevancy_model()
+    relevance_texts = [relevance_classifier_text(page) for page in pages]
+    scores = model.predict([(query, text) for text in relevance_texts])
+    ranked: list[dict[str, str]] = []
+    for page, relevance_text, score in zip(pages, relevance_texts, scores):
+        ranked_page = dict(page)
+        relevance_score = float(score)
+        ranked_page["relevance_score"] = f"{relevance_score:.3f}"
+        ranked_page["relevance_threshold"] = f"{RELEVANCY_THRESHOLD:.3f}"
+        ranked_page["relevance_model"] = RELEVANCY_MODEL
+        if prompt_debug_enabled():
+            print(f"[Relevance input begin: {len(relevance_text)} chars]")
+            print(f"Query: {query}")
+            print()
+            print(relevance_text)
+            print("[Relevance input end]")
+        ranked.append(ranked_page)
+    return sorted(ranked, key=lambda page: float(page.get("relevance_score", "0")), reverse=True)
+
+
 def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit: int, fetch_max_chars: int) -> str:
     raw_with_modes: list[tuple[str, dict[str, Any]]] = []
     mode_errors: list[str] = []
     with DDGS(timeout=DDGS_TIMEOUT_SECONDS) as ddgs:
         if "news" in SEARCH_MODES:
             try:
-                raw_with_modes.extend(("news", row) for row in ddgs.news(query, max_results=search_limit))
+                raw_with_modes.extend(("news", row) for row in ddgs.news(query, max_results=SEARCH_NEWS_LIMIT))
             except Exception as exc:
                 mode_errors.append(f"news: {exc}")
         if "text" in SEARCH_MODES:
             try:
-                raw_with_modes.extend(("text", row) for row in ddgs.text(query, max_results=search_limit))
+                raw_with_modes.extend(("text", row) for row in ddgs.text(query, max_results=SEARCH_TEXT_LIMIT))
             except Exception as exc:
                 mode_errors.append(f"text: {exc}")
 
@@ -512,6 +589,7 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
 
     search_items: list[dict[str, str]] = []
     seen_urls: set[str] = set()
+    fetch_debug: list[dict[str, str]] = []
     for search_mode, row in raw_with_modes:
         if not isinstance(row, dict):
             continue
@@ -534,34 +612,28 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
             )
             item = {
                 "title": str(title),
-                "url": url,
+                "url": normalized_url,
                 "snippet": str(snippet),
                 "published": published,
                 "search_mode": search_mode,
             }
-            if is_probable_ad_url(url):
-                continue
-            if is_root_homepage_url(url):
-                continue
-            if asks_for_current_info(query) and has_stale_year_marker(query, item):
-                continue
-            if asks_for_current_info(query) and "youtube.com" in url.lower():
-                continue
             search_items.append(item)
 
-    search_items = prioritize_search_items(search_items)
+    if not search_items:
+        raise RuntimeError("Search produced no usable URL candidates.")
 
-    fetched_good: list[dict[str, str]] = []
-    fetched_fallback: list[dict[str, str]] = []
-    fetch_debug: list[dict[str, str]] = []
-    candidate_limit = max(fetch_top_n, FETCH_CANDIDATE_N)
-    scan_items = search_items[:fetch_scan_limit]
+    ranked_search_items = score_search_items(query, prioritize_search_items(search_items))
+    if ranked_search_items:
+        print(f"[Search rank: {len(ranked_search_items)} candidates, {RELEVANCY_MODEL if DECIDER_RELEVANCE_ENABLED else 'disabled'}]")
+
+    fetched_survivors: list[dict[str, str]] = []
     workers = max(1, FETCH_WORKERS)
+    survivor_limit = max(FETCH_SURVIVOR_N, fetch_top_n)
 
-    for batch_start in range(0, len(scan_items), workers):
-        if len(fetched_good) >= candidate_limit:
+    for batch_start in range(0, len(ranked_search_items), workers):
+        if len(fetched_survivors) >= survivor_limit:
             break
-        batch = scan_items[batch_start:batch_start + workers]
+        batch = ranked_search_items[batch_start:batch_start + workers]
 
         def fetch_item(item: dict[str, str]) -> tuple[dict[str, str], dict[str, str], float]:
             fetch_start = time.perf_counter()
@@ -573,18 +645,6 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
             batch_results = list(executor.map(fetch_item, batch))
 
         for item, page, fetch_ms in batch_results:
-            content = page.get("content", "")
-            if content.startswith("Fetch error:"):
-                fetch_debug.append(
-                    {
-                        "url": item["url"],
-                        "status": "skip",
-                        "reason": content,
-                        "ms": f"{fetch_ms:.0f}",
-                    }
-                )
-                continue
-            ok, reason = fetched_page_quality(page)
             if not page.get("published") and item.get("published"):
                 page["published"] = item["published"]
                 page["date_source"] = "search_result"
@@ -596,55 +656,29 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
                     page["published"] = inferred_date
                     page["date_source"] = "content_inferred"
             page["search_mode"] = item.get("search_mode", "")
-            if DECIDER_RELEVANCE_ENABLED:
-                relevance_start = time.perf_counter()
-                is_relevant, relevance_score, relevance_excerpt = decide_article_relevance(query, page)
-                relevance_ms = (time.perf_counter() - relevance_start) * 1000
-                page["relevance_ms"] = f"{relevance_ms:.0f}"
-                page["relevance_score"] = f"{relevance_score:.3f}"
-                page["relevance_threshold"] = f"{RELEVANCY_THRESHOLD:.3f}"
-                page["relevance_model"] = RELEVANCY_MODEL
-                if prompt_debug_enabled():
-                    print(f"[Relevance input begin: {len(relevance_excerpt)} chars]")
-                    print(f"Query: {query}")
-                    print()
-                    print(relevance_excerpt)
-                    print("[Relevance input end]")
-                print(
-                    f"[Relevance: {relevance_ms:.0f} ms, "
-                    f"{RELEVANCY_MODEL}, score = {relevance_score:.3f}, "
-                    f"threshold = {RELEVANCY_THRESHOLD:.3f}, keep = {str(is_relevant).lower()}]"
-                )
-                if not is_relevant:
-                    fetch_debug.append(
-                        {
-                            "url": item["url"],
-                            "status": "skip",
-                            "reason": (
-                                f"irrelevant article score={relevance_score:.3f} "
-                                f"threshold={RELEVANCY_THRESHOLD:.3f}"
-                            ),
-                            "ms": f"{fetch_ms:.0f}",
-                            "relevance_ms": f"{relevance_ms:.0f}",
-                        }
-                    )
-                    continue
-            duplicate = duplicate_reason(page, fetched_good + fetched_fallback)
+            page["initial_relevance_score"] = item.get("initial_relevance_score", "")
+
+            reject_reason = post_fetch_reject_reason(query, item, page)
+            if reject_reason:
+                fetch_debug.append({"url": item["url"], "status": "skip", "reason": reject_reason, "ms": f"{fetch_ms:.0f}"})
+                continue
+
+            duplicate = duplicate_reason(page, fetched_survivors)
             if duplicate:
                 fetch_debug.append({"url": item["url"], "status": "skip", "reason": duplicate, "ms": f"{fetch_ms:.0f}"})
                 continue
-            if ok:
-                fetched_good.append(page)
-                fetch_debug.append({"url": item["url"], "status": "keep", "reason": reason, "ms": f"{fetch_ms:.0f}"})
-            else:
-                fetched_fallback.append(page)
-                fetch_debug.append({"url": item["url"], "status": "fallback", "reason": reason, "ms": f"{fetch_ms:.0f}"})
 
-    fetched_pages = list(fetched_good[:fetch_top_n])
+            fetched_survivors.append(page)
+            fetch_debug.append({"url": item["url"], "status": "keep", "reason": "post-fetch ok", "ms": f"{fetch_ms:.0f}"})
+            if len(fetched_survivors) >= survivor_limit:
+                break
 
-    payload = {"search_results": search_items, "fetched_pages": fetched_pages, "fetch_debug": fetch_debug}
+    ranked_pages = score_fetched_pages(query, fetched_survivors)
+    fetched_pages = ranked_pages[:fetch_top_n]
+    print(f"[Fetch rank: {len(fetched_survivors)} survivors -> {len(fetched_pages)} sources]")
+
+    payload = {"search_results": ranked_search_items, "fetched_pages": fetched_pages, "fetch_debug": fetch_debug}
     return json.dumps(payload, ensure_ascii=False, indent=2)
-
 
 def validate_llm_messages(messages: list[dict[str, str]]) -> str:
     serialized = json.dumps(messages, ensure_ascii=False, indent=2)
@@ -879,7 +913,6 @@ def summarize_with_ollama(excerpt_text: str) -> str:
         num_predict=DECIDER_SUMMARY_MAX_TOKENS,
     )
     return normalize_summary_text(generated)
-
 
 def summarize_article_excerpt(excerpt_text: str) -> str:
     if SUMMARY_PROVIDER == "python":

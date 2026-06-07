@@ -2,7 +2,7 @@
 
 MisterSmartyPants is a local AI chat demo that combines an Ollama-hosted chat model with built-in search. Live web search is triggered when a query needs current information or knowledge beyond the model's training. Search articles are extracted, scored for relevance, and summarized before being sent to the chat LLM. It is important to note that not all LLMs reliably use new information supplied in context; models that handle RAG-style context well will perform best.
 
-This demo was developed on a slow CPU-only, memory-bound system, yet it performs surprisingly well. The chat LLM as configured is llama3.2:latest. Several lightweight Hugging Face models are also used to decide when to search and to process search results.
+This demo was developed on a slow CPU-only, memory-bound system, yet it performs surprisingly well. The chat LLM as configured is llama3.2:latest. Several lightweight local models are also used to decide when to search and to process search results. The default summary path uses Ollama, while the search decider and relevance filter use Python models.
 
 This project started as a practical experiment in making local models better at current-event questions without dumping raw search results into the final LLM prompt. The current pipeline tries to keep the slow, capable model focused on clean, relevant, current source material.
 
@@ -22,7 +22,7 @@ user question
   -> fetch candidate pages
   -> Trafilatura article extraction
   -> cross-encoder relevance scoring (Python sentence-transformers)
-  -> article summarization (Python Transformers)
+  -> article summarization (Ollama by default, Python Transformers optional)
   -> final LLM answer (Python requests + Ollama HTTP API)
 ```
 
@@ -35,7 +35,7 @@ The goal is to reduce prompt bloat, keep poor search results away from the final
 - DDGS web search using news and text search modes
 - Trafilatura article extraction
 - Cross-encoder relevance filtering
-- Local Python summarizer model for article excerpts
+- Configurable article summarization through Ollama or Python Transformers
 - Rich Markdown terminal rendering
 - Browser chat UI through FastAPI
 - Per-browser session isolation for the HTTP server
@@ -125,19 +125,24 @@ Important settings:
 OLLAMA_API=http://localhost:11434/api/chat
 OLLAMA_MODEL=llama3.2:latest
 OLLAMA_TIMEOUT_SECONDS=1200
+OLLAMA_NUM_PREDICT=4096
+OLLAMA_NUM_THREAD=
 ```
+
+`OLLAMA_NUM_PREDICT` is the maximum generated-token budget for normal Ollama answers. Lowering it can speed up final responses if your model tends to produce long answers. Try `1024` or `2048` if speed matters more than long-form output. Ollama-based article summaries use `DECIDER_SUMMARY_MAX_TOKENS` instead.
 
 Search and fetch settings:
 
 ```env
 SEARCH_MODES=news,text
+SEARCH_NEWS_LIMIT=10
+SEARCH_TEXT_LIMIT=50
 FETCH_TOP_N=5
-FETCH_SCAN_LIMIT=20
-FETCH_CANDIDATE_N=5
+FETCH_SURVIVOR_N=20
 FETCH_WORKERS=4
 ```
 
-`FETCH_WORKERS` is the fetch/extraction thread count. Lower it to reduce CPU and network pressure during article fetching; raise it to fetch more pages in parallel.
+`SEARCH_NEWS_LIMIT` and `SEARCH_TEXT_LIMIT` control the large initial DDGS sample. `FETCH_SURVIVOR_N` controls how many post-Trafilatura survivors are collected before final reranking. `FETCH_TOP_N` controls how many final ranked sources are sent forward. `FETCH_WORKERS` is the fetch/extraction thread count. Lower it to reduce CPU and network pressure during article fetching; raise it to fetch more pages in parallel. `OLLAMA_NUM_THREAD` is optional; leave it blank to let Ollama choose, or set it to tune CPU threads for Ollama calls, including Ollama-based summaries.
 
 Search decision settings:
 
@@ -165,7 +170,7 @@ DECIDER_RELEVANCE_ENABLED=1
 DECIDER_RELEVANCE_EXCERPT_CHARS=1200
 ```
 
-Prompt settings are also in `.env`, including the final answer prompt, query builder prompt, memory-answer prompt, and search-decider prompt.
+Prompt settings are also in `.env`, including the final answer prompt, query builder prompt, memory-answer prompt, search-decider prompt, and article-summary prompt.
 
 ## Hugging Face Token
 
@@ -231,7 +236,7 @@ GET  /api/chat/{job_id}  Poll a chat job until it is done
 POST /api/new
 ```
 
-The server uses an `msp_session` cookie. Each browser session gets its own `ChatSession`, including its own history and slash-command state.
+The server uses an `msp_session` cookie. Each browser session gets its own `ChatSession`, including its own history and slash-command state. Chat requests run as background jobs so reverse proxies and Cloudflare do not have to hold one long request open. The browser polls job status and shows a changing `[working...]` indicator while the job runs.
 
 ## Reverse Proxy Notes
 
@@ -251,19 +256,20 @@ Do not expose Ollama directly. Expose only the MisterSmartyPants HTTP server.
 
 ## Search Pipeline Details
 
-The search pipeline intentionally avoids sending raw search result dumps directly to the final LLM.
+The search pipeline intentionally avoids sending raw search result dumps directly to the final LLM. Search result quality is still the weakest link when using free search backends; if the initial search candidates are poor, extraction, relevance scoring, and summarization can only recover so much. A dedicated paid search or news API will likely improve answer quality more than additional prompt tuning.
 
 Current behavior:
 
 1. The search decider decides whether current web data is needed.
-2. DDGS runs configured search modes, usually `news,text`.
-3. Candidate URLs are deduplicated and filtered.
-4. Obvious homepage/root URLs are skipped.
-5. Pages are fetched.
-6. Trafilatura extracts article text.
-7. A cross-encoder scores `(query, extracted excerpt)` for relevance.
-8. Relevant articles are summarized by a small local Python model.
-9. The final Ollama model receives the user question and summarized current source material.
+2. DDGS runs configured search modes, usually 10 news results plus 50 text results.
+3. Candidate URLs are deduplicated.
+4. A cross-encoder ranks the large search-result sample using title, URL, date, and snippet.
+5. Pages are fetched in that ranked order until the pipeline has up to 20 post-Trafilatura survivors or runs out of candidates.
+6. Trafilatura extracts full article text without app-level truncation.
+7. Post-fetch rejection removes fetch failures, empty/short extractions, stale current-info results, redirected homepages, ad/tracking URLs, YouTube current-info results, and near-duplicates.
+8. A cross-encoder reranks surviving extracted articles using metadata plus extracted text.
+9. The top 5 articles are summarized by the configured summary provider, usually Ollama.
+10. The final Ollama model receives the user question and summarized current source material.
 
 Useful logs include:
 
@@ -279,9 +285,9 @@ Useful logs include:
 
 Python models are loaded through Hugging Face and cached locally.
 
-The search decider and summary model use local-first snapshot loading. The relevance cross-encoder also uses local-first snapshot loading.
+The search decider uses local-first snapshot loading. The relevance cross-encoder also uses local-first snapshot loading. If `SUMMARY_PROVIDER=python`, the summary model uses the same local-first Hugging Face cache path. If `SUMMARY_PROVIDER=ollama`, the summary model must be available in Ollama, for example with `ollama pull qwen2.5:0.5b-instruct`.
 
-First run may download model files. Later runs should use the local Hugging Face cache.
+First run may download Python model files. Later runs should use the local Hugging Face cache.
 
 ## Project Scripts
 
