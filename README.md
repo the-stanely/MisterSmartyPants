@@ -21,7 +21,7 @@ user question
   -> web search (DDGS)
   -> fetch candidate pages
   -> Trafilatura article extraction
-  -> cross-encoder relevance scoring (Python sentence-transformers)
+  -> cross-encoder relevance ranking (Python sentence-transformers)
   -> article summarization (Ollama by default, Python Transformers optional)
   -> final LLM answer (Python requests + Ollama HTTP API)
 ```
@@ -34,7 +34,7 @@ The goal is to reduce prompt bloat, keep poor search results away from the final
 - Python/Transformers search decider
 - DDGS web search using news and text search modes
 - Trafilatura article extraction
-- Cross-encoder relevance filtering
+- Cross-encoder relevance ranking
 - Configurable article summarization through Ollama or Python Transformers
 - Rich Markdown terminal rendering
 - Browser chat UI through FastAPI
@@ -161,14 +161,15 @@ SUMMARY_MODEL=qwen2.5:0.5b-instruct
 DECIDER_SUMMARY_MAX_TOKENS=300
 ```
 
-Relevance scoring settings:
+Relevance ranking settings:
 
 ```env
 RELEVANCY_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
-RELEVANCY_THRESHOLD=0.0
 DECIDER_RELEVANCE_ENABLED=1
 DECIDER_RELEVANCE_EXCERPT_CHARS=1200
 ```
+
+The cross-encoder is now used twice as a numeric ranker: first over DDGS result metadata before fetch, then again over extracted Trafilatura article text after post-fetch rejection. `RELEVANCY_THRESHOLD` may still exist in older `.env` files, but the current main search path ranks and selects top results instead of using it as the primary article gate.
 
 Prompt settings are also in `.env`, including the final answer prompt, query builder prompt, memory-answer prompt, search-decider prompt, and article-summary prompt.
 
@@ -236,6 +237,16 @@ GET  /api/chat/{job_id}  Poll a chat job until it is done
 POST /api/new
 ```
 
+Public static/crawler endpoints:
+
+```text
+GET /favicon.ico
+GET /robots.txt
+GET /sitemap.xml
+```
+
+The crawler files live in `static/robots.txt` and `static/sitemap.xml`. Update the sitemap URL if you host the demo on a different domain.
+
 The server uses an `msp_session` cookie. Each browser session gets its own `ChatSession`, including its own history and slash-command state. Chat requests run as background jobs so reverse proxies and Cloudflare do not have to hold one long request open. The browser polls job status and shows a changing `[working...]` indicator while the job runs.
 
 ## Reverse Proxy Notes
@@ -266,7 +277,7 @@ Current behavior:
 4. A cross-encoder ranks the large search-result sample using title, URL, date, and snippet.
 5. Pages are fetched in that ranked order until the pipeline has up to 20 post-Trafilatura survivors or runs out of candidates.
 6. Trafilatura extracts full article text without app-level truncation.
-7. Post-fetch rejection removes fetch failures, empty/short extractions, stale current-info results, redirected homepages, ad/tracking URLs, YouTube current-info results, and near-duplicates.
+7. Post-fetch rejection removes fetch failures, empty/short extractions, stale current-info results using title/snippet/URL/published date, redirected homepages, ad/tracking URLs, YouTube current-info results, and near-duplicates.
 8. A cross-encoder reranks surviving extracted articles using metadata plus extracted text.
 9. The top 5 articles are summarized by the configured summary provider, usually Ollama.
 10. The final Ollama model receives the user question and summarized current source material.
@@ -275,11 +286,14 @@ Useful logs include:
 
 ```text
 [Decider: nnn ms, Search = x.xxx, Answer = y.yyy]
-[Relevance: nnn ms, model, score = x.xxx, threshold = y.yyy, keep = true]
+[Search rank: nnn candidates, model]
+[Fetch rank: nnn survivors -> 5 sources]
 [Search: nnn ms, nnn chars]
 [Summaries: nnn ms, original_chars -> summarized_chars, provider, model]
 [LLM: nnn ms, model]
 ```
+
+With `/prompt-on`, relevance debug output also shows the exact metadata and extracted text sent to the cross-encoder for the post-fetch ranking pass.
 
 ## Model Downloads and Cache
 

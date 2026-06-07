@@ -56,6 +56,21 @@ def index() -> FileResponse:
     return response
 
 
+@app.get("/favicon.ico")
+def favicon() -> FileResponse:
+    return FileResponse(STATIC_DIR / "favicon.ico")
+
+
+@app.get("/robots.txt")
+def robots() -> FileResponse:
+    return FileResponse(STATIC_DIR / "robots.txt", media_type="text/plain")
+
+
+@app.get("/sitemap.xml")
+def sitemap() -> FileResponse:
+    return FileResponse(STATIC_DIR / "sitemap.xml", media_type="application/xml")
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}

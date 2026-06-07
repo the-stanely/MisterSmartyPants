@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://MisterSmartyPants.us/sitemap.xml
