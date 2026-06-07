@@ -22,7 +22,7 @@
 </head>
 <body>
   <main>
-    <header><h1>MisterSmartyPants</h1><div style="font-size:12px;color:#8b949e;margin-top:4px">build 2026-06-06 json-safe</div></header>
+    <header><h1>MisterSmartyPants</h1><div style="font-size:12px;color:#8b949e;margin-top:4px">build 2026-06-06 async-jobs</div></header>
     <section id="log" aria-live="polite"></section>
     <form id="chat-form">
       <textarea id="message" placeholder="Ask something or use /?" autofocus></textarea>
@@ -47,13 +47,25 @@
       return text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
     }
 
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function readJsonResponse(res) {
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        return await res.json();
+      }
+      return {error: await res.text()};
+    }
+
     form.addEventListener('submit', async event => {
       event.preventDefault();
       const text = message.value.trim();
       if (!text) return;
       message.value = '';
       send.disabled = true;
-      appendTurn(text, '[working...]');
+      appendTurn(text, '[working]');
       const current = log.lastElementChild.querySelector('.output');
       try {
         const res = await fetch('/api/chat', {
@@ -61,12 +73,31 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({message: text})
         });
-        const contentType = res.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          const data = await res.json();
-          current.textContent = data.output || data.error || '';
-        } else {
-          current.textContent = await res.text();
+        const started = await readJsonResponse(res);
+        if (!res.ok || started.error) {
+          current.textContent = started.output || started.error || `HTTP ${res.status}`;
+          return;
+        }
+        if (started.done || !started.job_id) {
+          current.textContent = started.output || '';
+          return;
+        }
+
+        let pollCount = 0;
+        while (true) {
+          await sleep(1000);
+          pollCount += 1;
+          current.textContent = `[working${'.'.repeat(pollCount % 4)}]`;
+          const pollRes = await fetch(`/api/chat/${encodeURIComponent(started.job_id)}`);
+          const data = await readJsonResponse(pollRes);
+          if (!pollRes.ok || data.error) {
+            current.textContent = data.output || data.error || `HTTP ${pollRes.status}`;
+            return;
+          }
+          if (data.done) {
+            current.textContent = data.output || '';
+            return;
+          }
         }
       } catch (err) {
         current.textContent = String(err);
@@ -75,7 +106,6 @@
         message.focus();
       }
     });
-
     message.addEventListener('keydown', event => {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();

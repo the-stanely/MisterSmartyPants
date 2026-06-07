@@ -223,7 +223,8 @@ API endpoints:
 
 ```text
 GET  /api/health
-POST /api/chat
+POST /api/chat           Start a chat job
+GET  /api/chat/{job_id}  Poll a chat job until it is done
 POST /api/new
 ```
 

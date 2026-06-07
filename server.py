@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import Cookie, FastAPI, Response
+from fastapi import Cookie, FastAPI, Response, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -17,6 +17,8 @@ STATIC_DIR = BASE_DIR / "static"
 
 sessions: dict[str, ChatSession] = {}
 sessions_lock = threading.Lock()
+jobs: dict[str, dict[str, object]] = {}
+jobs_lock = threading.Lock()
 chat_lock = threading.Lock()
 
 
@@ -66,14 +68,9 @@ def new_chat(response: Response, msp_session: str | None = Cookie(default=None))
     return {"status": "cleared"}
 
 
-@app.post("/api/chat")
-def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(default=None)) -> JSONResponse:
-    message = req.message.strip()
-    if not message:
-        return JSONResponse({"output": ""})
-
-    _, session = get_session(msp_session, response)
+def run_chat_job(job_id: str, session: ChatSession, message: str) -> None:
     buffer = io.StringIO()
+    error: str | None = None
     with chat_lock:
         try:
             with redirect_stdout(buffer), redirect_stderr(buffer):
@@ -83,5 +80,40 @@ def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(
             if output and not output.endswith("\n"):
                 output += "\n"
             output += f"[Server error] {type(exc).__name__}: {exc}\n"
-            return JSONResponse({"output": output, "error": str(exc)}, status_code=200)
-    return JSONResponse({"output": buffer.getvalue()})
+            buffer = io.StringIO(output)
+            error = str(exc)
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is not None:
+            job["done"] = True
+            job["output"] = buffer.getvalue()
+            job["error"] = error
+
+
+@app.post("/api/chat")
+def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(default=None)) -> JSONResponse:
+    message = req.message.strip()
+    if not message:
+        return JSONResponse({"done": True, "output": ""})
+
+    session_id, session = get_session(msp_session, response)
+    job_id = uuid4().hex
+    with jobs_lock:
+        jobs[job_id] = {"session_id": session_id, "done": False, "output": "", "error": None}
+
+    thread = threading.Thread(target=run_chat_job, args=(job_id, session, message), daemon=True)
+    thread.start()
+    return JSONResponse({"job_id": job_id, "done": False})
+
+
+@app.get("/api/chat/{job_id}")
+def chat_status(job_id: str, msp_session: str | None = Cookie(default=None)) -> JSONResponse:
+    if not msp_session:
+        return JSONResponse({"error": "Job not found"}, status_code=status.HTTP_404_NOT_FOUND)
+
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None or job.get("session_id") != msp_session:
+            return JSONResponse({"error": "Job not found"}, status_code=status.HTTP_404_NOT_FOUND)
+        return JSONResponse({"done": job["done"], "output": job["output"], "error": job["error"]})
