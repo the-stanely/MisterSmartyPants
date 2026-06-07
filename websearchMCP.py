@@ -64,7 +64,7 @@ SUMMARY_PROVIDER = os.getenv("SUMMARY_PROVIDER", "python").strip().lower()
 DECIDER_SUMMARY_MAX_TOKENS = int(os.getenv("DECIDER_SUMMARY_MAX_TOKENS", "180"))
 DECIDER_SUMMARY_PROMPT = os.getenv(
     "DECIDER_SUMMARY_PROMPT",
-    "Write a very brief summary of the following article:\n\n{excerpt_text}",
+    "User question:\n{user_question}\n\nWrite a concise summary of the article focusing on information that helps answer the user question. Preserve dates, names, numbers, and source-specific claims. Do not add information not present in the article.\n\nArticle:\n{excerpt_text}",
 )
 PYTHON_GENERATION_NO_THINK = os.getenv("PYTHON_GENERATION_NO_THINK", "1") == "1"
 PYTHON_GENERATION_NO_THINK_INSTRUCTION = os.getenv("PYTHON_GENERATION_NO_THINK_INSTRUCTION", "/no_think")
@@ -969,9 +969,12 @@ def excerpt_body(content: str) -> str:
     return text
 
 
-def summary_prompt_for_excerpt(excerpt_text: str) -> str:
-    return expand_prompt_placeholders(DECIDER_SUMMARY_PROMPT).replace("{excerpt_text}", excerpt_text)
-
+def summary_prompt_for_excerpt(excerpt_text: str, user_question: str) -> str:
+    return (
+        expand_prompt_placeholders(DECIDER_SUMMARY_PROMPT)
+        .replace("{user_question}", user_question)
+        .replace("{excerpt_text}", excerpt_text)
+    )
 
 def normalize_summary_text(generated: str) -> str:
     summary = re.sub(r"\s+", " ", generated or "").strip()
@@ -982,7 +985,7 @@ def normalize_summary_text(generated: str) -> str:
     return f"{summary} [END EXCERPT]"
 
 
-def summarize_with_python(excerpt_text: str) -> str:
+def summarize_with_python(excerpt_text: str, user_question: str) -> str:
     summary_model = get_python_model(SUMMARY_MODEL)
     tokenizer = summary_model["tokenizer"]
     model = summary_model["model"]
@@ -991,7 +994,7 @@ def summarize_with_python(excerpt_text: str) -> str:
     messages = [
         {
             "role": "user",
-            "content": apply_python_generation_controls(summary_prompt_for_excerpt(excerpt_text)),
+            "content": apply_python_generation_controls(summary_prompt_for_excerpt(excerpt_text, user_question)),
         }
     ]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -1007,22 +1010,22 @@ def summarize_with_python(excerpt_text: str) -> str:
     return normalize_summary_text(generated)
 
 
-def summarize_with_ollama(excerpt_text: str) -> str:
+def summarize_with_ollama(excerpt_text: str, user_question: str) -> str:
     generated = chat_once(
-        [{"role": "user", "content": summary_prompt_for_excerpt(excerpt_text)}],
+        [{"role": "user", "content": summary_prompt_for_excerpt(excerpt_text, user_question)}],
         model=SUMMARY_MODEL,
         num_predict=DECIDER_SUMMARY_MAX_TOKENS,
     )
     return normalize_summary_text(generated)
 
-def summarize_article_excerpt(excerpt_text: str) -> str:
+def summarize_article_excerpt(excerpt_text: str, user_question: str) -> str:
     if SUMMARY_PROVIDER == "python":
-        return summarize_with_python(excerpt_text)
+        return summarize_with_python(excerpt_text, user_question)
     if SUMMARY_PROVIDER == "ollama":
-        return summarize_with_ollama(excerpt_text)
+        return summarize_with_ollama(excerpt_text, user_question)
     raise ValueError(f"Unsupported SUMMARY_PROVIDER={SUMMARY_PROVIDER!r}; expected 'python' or 'ollama'.")
 
-def summarize_search_result_excerpts(tool_json: str) -> str:
+def summarize_search_result_excerpts(tool_json: str, user_question: str) -> str:
     parsed = parse_search_data_for_prompt(tool_json)
     fetched_pages = parsed.get("fetched_pages", [])
     if not isinstance(fetched_pages, list):
@@ -1037,7 +1040,7 @@ def summarize_search_result_excerpts(tool_json: str) -> str:
         if not excerpt:
             raise ValueError("Cannot summarize empty extracted article excerpt.")
         original_content_chars = len(str(page.get("content") or ""))
-        page["content"] = summarize_article_excerpt(excerpt)
+        page["content"] = summarize_article_excerpt(excerpt, user_question)
         page["summary_provider"] = SUMMARY_PROVIDER
         page["summary_model"] = SUMMARY_MODEL
         page["summary_original_content_chars"] = str(original_content_chars)
@@ -1355,7 +1358,7 @@ def print_commands() -> None:
     print("[Commands]")
     print("/?                 Show commands.")
     print("/new               Clear chat context.")
-    print("/decider <prompt>  Run Python decider only; bypass rules.")
+    print("/decider <prompt>  Run Python decider only; bypass rules, bypass LLM.")
     print("/search-off        Disable search and send prompt directly to the LLM.")
     print("/search-on         Enable search and decider logic.")
     print("/llm-off           Skip final LLM answer after search.")
@@ -1489,7 +1492,7 @@ class ChatSession:
         if SUMMARIZE_EXCERPTS:
             summary_start = time.perf_counter()
             original_chars = len(result)
-            result = summarize_search_result_excerpts(result)
+            result = summarize_search_result_excerpts(result, query)
             summary_ms = (time.perf_counter() - summary_start) * 1000
             print(f"[Summaries: {summary_ms:.0f} ms, {original_chars} -> {len(result)} chars, {SUMMARY_PROVIDER}, {SUMMARY_MODEL}]")
 

@@ -159,6 +159,7 @@ SUMMARIZE_EXCERPTS=1
 SUMMARY_PROVIDER=ollama
 SUMMARY_MODEL=qwen2.5:0.5b-instruct
 DECIDER_SUMMARY_MAX_TOKENS=300
+DECIDER_SUMMARY_PROMPT="User question:\n{user_question}\n...\nArticle:\n{excerpt_text}"
 ```
 
 Relevance ranking settings:
@@ -171,7 +172,7 @@ DECIDER_RELEVANCE_EXCERPT_CHARS=1200
 
 The cross-encoder is now used twice as a numeric ranker: first over DDGS result metadata before fetch, then again over extracted Trafilatura article text after post-fetch rejection. `RELEVANCY_THRESHOLD` may still exist in older `.env` files, but the current main search path ranks and selects top results instead of using it as the primary article gate.
 
-Prompt settings are also in `.env`, including the final answer prompt, query builder prompt, memory-answer prompt, search-decider prompt, and article-summary prompt.
+Prompt settings are also in `.env`, including the final answer prompt, query builder prompt, memory-answer prompt, search-decider prompt, and article-summary prompt. The article-summary prompt supports `{user_question}` and `{excerpt_text}` so summaries can be focused on the original request.
 
 ## Hugging Face Token
 
