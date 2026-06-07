@@ -25,6 +25,7 @@
     .turn { margin: 0 0 18px; }
     .user { color: #9fd3ff; }
     .output { color: #e8e8e8; }
+    .status { color: #8b949e; margin-top: 4px; min-height: 1.45em; }
     form { display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid #2b3035; }
     textarea { flex: 1; min-height: 84px; max-height: 180px; resize: vertical; border: 1px solid #3b424a; border-radius: 6px; padding: 10px; background: #171a1d; color: #f4f4f4; font: inherit; }
     button { border: 1px solid #3b424a; border-radius: 6px; padding: 0 16px; background: #2563eb; color: white; font: inherit; cursor: pointer; }
@@ -49,9 +50,9 @@
     function appendTurn(input, output) {
       const block = document.createElement('div');
       block.className = 'turn';
-      block.innerHTML = `<div class="user">AI ready&gt; ${escapeHtml(input)}</div><div class="output">${escapeHtml(output)}</div>`;
+      block.innerHTML = `<div class="user">AI ready&gt; ${escapeHtml(input)}</div><div class="output">${escapeHtml(output)}</div><div class="status"></div>`;
       log.appendChild(block);
-      log.scrollTop = log.scrollHeight;
+      scrollToBottom();
     }
 
     function escapeHtml(text) {
@@ -60,6 +61,11 @@
 
     function sleep(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function scrollToBottom() {
+      log.scrollTop = log.scrollHeight;
+      form.scrollIntoView({block: 'end'});
     }
 
     async function readJsonResponse(res) {
@@ -76,8 +82,12 @@
       if (!text) return;
       message.value = '';
       send.disabled = true;
-      appendTurn(text, '[working]');
-      const current = log.lastElementChild.querySelector('.output');
+      appendTurn(text, '');
+      const turn = log.lastElementChild;
+      const current = turn.querySelector('.output');
+      const statusLine = turn.querySelector('.status');
+      statusLine.textContent = '[working]';
+      scrollToBottom();
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
@@ -87,10 +97,14 @@
         const started = await readJsonResponse(res);
         if (!res.ok || started.error) {
           current.textContent = started.output || started.error || `HTTP ${res.status}`;
+          statusLine.textContent = '';
+          scrollToBottom();
           return;
         }
         if (started.done || !started.job_id) {
           current.textContent = started.output || '';
+          statusLine.textContent = '';
+          scrollToBottom();
           return;
         }
 
@@ -98,31 +112,37 @@
         while (true) {
           await sleep(1000);
           pollCount += 1;
-          if (!current.textContent || current.textContent.startsWith('[working')) {
-            current.textContent = `[working${'.'.repeat(pollCount % 4)}]`;
-          }
+          statusLine.textContent = `[working${'.'.repeat(pollCount % 4)}]`;
+          scrollToBottom();
           const pollRes = await fetch(`/api/chat/${encodeURIComponent(started.job_id)}`);
           const data = await readJsonResponse(pollRes);
           if (!pollRes.ok || data.error) {
             current.textContent = data.output || data.error || `HTTP ${pollRes.status}`;
+            statusLine.textContent = '';
+            scrollToBottom();
             return;
           }
           if (data.output) {
             current.textContent = data.output;
-            log.scrollTop = log.scrollHeight;
+            scrollToBottom();
           }
           if (data.done) {
             current.textContent = data.output || '';
+            statusLine.textContent = '';
+            scrollToBottom();
             return;
           }
         }
       } catch (err) {
         current.textContent = String(err);
+        statusLine.textContent = '';
+        scrollToBottom();
       } finally {
         send.disabled = false;
         message.focus();
       }
     });
+
     message.addEventListener('keydown', event => {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
