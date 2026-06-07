@@ -137,6 +137,8 @@ FETCH_CANDIDATE_N=5
 FETCH_WORKERS=4
 ```
 
+`FETCH_WORKERS` is the fetch/extraction thread count. Lower it to reduce CPU and network pressure during article fetching; raise it to fetch more pages in parallel.
+
 Search decision settings:
 
 ```env

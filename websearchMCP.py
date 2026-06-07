@@ -25,6 +25,12 @@ try:
 except Exception:
     pass
 
+
+def read_positive_int_env(name: str, default: str) -> int:
+    value = int(os.getenv(name, default))
+    if value < 1:
+        raise ValueError(f"{name} must be 1 or greater; got {value}")
+    return value
 OLLAMA_API = os.getenv("OLLAMA_API", "http://localhost:11434/api/chat")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "cow/gemma2_tools")
 OLLAMA_DECIDER_MODEL = os.getenv("OLLAMA_DECIDER_MODEL", "llama3.2:1b")
@@ -37,11 +43,11 @@ OLLAMA_NUM_THREAD_RAW = os.getenv("OLLAMA_NUM_THREAD", "").strip()
 OLLAMA_NUM_THREAD = int(OLLAMA_NUM_THREAD_RAW) if OLLAMA_NUM_THREAD_RAW else None
 QUESTION = os.getenv("QUESTION", "Wall street biggest movers.")
 SEARCH_LIMIT = 12
-FETCH_TOP_N = int(os.getenv("FETCH_TOP_N", "5"))
+FETCH_TOP_N = read_positive_int_env("FETCH_TOP_N", "5")
 FETCH_MAX_CHARS = int(os.getenv("FETCH_MAX_CHARS", "3000"))
-FETCH_SCAN_LIMIT = int(os.getenv("FETCH_SCAN_LIMIT", "20"))
-FETCH_CANDIDATE_N = int(os.getenv("FETCH_CANDIDATE_N", "5"))
-FETCH_WORKERS = int(os.getenv("FETCH_WORKERS", "4"))
+FETCH_SCAN_LIMIT = read_positive_int_env("FETCH_SCAN_LIMIT", "20")
+FETCH_CANDIDATE_N = read_positive_int_env("FETCH_CANDIDATE_N", "5")
+FETCH_WORKERS = read_positive_int_env("FETCH_WORKERS", "4")
 SEARCH_MODES = tuple(
     mode.strip().lower()
     for mode in os.getenv("SEARCH_MODES", "news,text").split(",")
@@ -62,6 +68,7 @@ RELEVANCY_THRESHOLD = float(os.getenv("RELEVANCY_THRESHOLD", "0.0"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
 DDGS_TIMEOUT_SECONDS = int(os.getenv("DDGS_TIMEOUT_SECONDS", "20"))
 DEBUG = False
+
 PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
 LLM_ENABLED = os.getenv("LLM_ENABLED", "1") == "1"
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1") == "1"
@@ -855,40 +862,28 @@ def summarize_with_decider(excerpt_text: str) -> str:
     return f"{summary} [END EXCERPT]"
 
 
-def decide_article_relevance(user_question: str, page: dict[str, str]) -> tuple[bool, float, str]:
-    model = get_relevancy_model()
+def relevance_classifier_text(page: dict[str, str]) -> str:
+    metadata = [
+        ("Title", str(page.get("title") or "").strip()),
+        ("URL", str(page.get("url") or "").strip()),
+        ("Published", str(page.get("published") or "").strip()),
+        ("Source", str(page.get("source") or page.get("domain") or "").strip()),
+    ]
+    lines = [f"{label}: {value}" for label, value in metadata if value]
     excerpt = excerpt_body(str(page.get("content") or ""))[:DECIDER_RELEVANCE_EXCERPT_CHARS]
     if not excerpt:
         raise ValueError("Article relevance classifier received empty excerpt.")
-    score = float(model.predict([(user_question, excerpt)])[0])
-    return score >= RELEVANCY_THRESHOLD, score, excerpt
+    if lines:
+        lines.extend(["", "Excerpt:", excerpt])
+        return "\n".join(lines)
+    return excerpt
 
 
-def summarize_search_result_excerpts(tool_json: str) -> str:
-    if not SUMMARIZE_EXCERPTS_WITH_DECIDER:
-        return tool_json
-    parsed = parse_search_data_for_prompt(tool_json)
-    fetched_pages = parsed.get("fetched_pages", [])
-    if not isinstance(fetched_pages, list):
-        return tool_json
-    for page in fetched_pages[:5]:
-        if not isinstance(page, dict) or page.get("extractor") != "trafilatura":
-            continue
-        body = excerpt_body(str(page.get("content") or ""))
-        if not body:
-            continue
-        original_content_chars = len(str(page.get("content") or ""))
-        summary_start = time.perf_counter()
-        summary = summarize_with_decider(body)
-        summary_ms = (time.perf_counter() - summary_start) * 1000
-        page["original_content_chars"] = str(original_content_chars)
-        page["content"] = summary
-        page["content_chars"] = str(len(summary))
-        page["summary_model"] = SUMMARY_MODEL
-        page["summary_ms"] = f"{summary_ms:.0f}"
-        page["summarized"] = "true"
-    return json.dumps(parsed, ensure_ascii=False, indent=2)
-
+def decide_article_relevance(user_question: str, page: dict[str, str]) -> tuple[bool, float, str]:
+    model = get_relevancy_model()
+    relevance_text = relevance_classifier_text(page)
+    score = float(model.predict([(user_question, relevance_text)])[0])
+    return score >= RELEVANCY_THRESHOLD, score, relevance_text
 
 def format_decider_user_content(user_prompt: str) -> str:
     return (
