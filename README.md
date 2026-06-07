@@ -150,9 +150,10 @@ FORCE_SEARCH_MARKERS=latest,today,yesterday,current,news,recent,newest,weather,s
 Summarization settings:
 
 ```env
-SUMMARY_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+SUMMARIZE_EXCERPTS=1
+SUMMARY_PROVIDER=ollama
+SUMMARY_MODEL=qwen2.5:0.5b-instruct
 DECIDER_SUMMARY_MAX_TOKENS=300
-SUMMARIZE_EXCERPTS_WITH_DECIDER=1
 ```
 
 Relevance scoring settings:
@@ -270,7 +271,7 @@ Useful logs include:
 [Decider: nnn ms, Search = x.xxx, Answer = y.yyy]
 [Relevance: nnn ms, model, score = x.xxx, threshold = y.yyy, keep = true]
 [Search: nnn ms, nnn chars]
-[Summaries: nnn ms, original_chars -> summarized_chars, model]
+[Summaries: nnn ms, original_chars -> summarized_chars, provider, model]
 [LLM: nnn ms, model]
 ```
 

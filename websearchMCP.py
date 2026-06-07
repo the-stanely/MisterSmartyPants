@@ -53,7 +53,11 @@ SEARCH_MODES = tuple(
     for mode in os.getenv("SEARCH_MODES", "news,text").split(",")
     if mode.strip()
 )
-SUMMARIZE_EXCERPTS_WITH_DECIDER = os.getenv("SUMMARIZE_EXCERPTS_WITH_DECIDER", "1") == "1"
+SUMMARIZE_EXCERPTS = os.getenv(
+    "SUMMARIZE_EXCERPTS",
+    os.getenv("SUMMARIZE_EXCERPTS_WITH_DECIDER", "1"),
+) == "1"
+SUMMARY_PROVIDER = os.getenv("SUMMARY_PROVIDER", "python").strip().lower()
 DECIDER_SUMMARY_MAX_TOKENS = int(os.getenv("DECIDER_SUMMARY_MAX_TOKENS", "180"))
 DECIDER_SUMMARY_PROMPT = os.getenv(
     "DECIDER_SUMMARY_PROMPT",
@@ -713,7 +717,7 @@ def print_prompt_debug(messages: list[dict[str, str]], serialized: str, model: s
     print()
 
 
-def chat_once(messages: list[dict[str, str]], model: str = OLLAMA_MODEL) -> str:
+def chat_once(messages: list[dict[str, str]], model: str = OLLAMA_MODEL, num_predict: int | None = None) -> str:
     serialized_messages = validate_llm_messages(messages)
     if prompt_debug_enabled():
         print_prompt_debug(messages, serialized_messages, model)
@@ -723,7 +727,7 @@ def chat_once(messages: list[dict[str, str]], model: str = OLLAMA_MODEL) -> str:
         "num_ctx": OLLAMA_NUM_CTX,
         "temperature": OLLAMA_TEMPERATURE,
         "top_p": OLLAMA_TOP_P,
-        "num_predict": OLLAMA_NUM_PREDICT,
+        "num_predict": num_predict if num_predict is not None else OLLAMA_NUM_PREDICT,
     }
     if OLLAMA_NUM_THREAD is not None:
         options["num_thread"] = OLLAMA_NUM_THREAD
@@ -830,7 +834,20 @@ def excerpt_body(content: str) -> str:
     return text
 
 
-def summarize_with_decider(excerpt_text: str) -> str:
+def summary_prompt_for_excerpt(excerpt_text: str) -> str:
+    return expand_prompt_placeholders(DECIDER_SUMMARY_PROMPT).replace("{excerpt_text}", excerpt_text)
+
+
+def normalize_summary_text(generated: str) -> str:
+    summary = re.sub(r"\s+", " ", generated or "").strip()
+    if not summary:
+        raise ValueError("Article summary was empty.")
+    if not summary.endswith((".", "!", "?")):
+        summary = f"{summary}."
+    return f"{summary} [END EXCERPT]"
+
+
+def summarize_with_python(excerpt_text: str) -> str:
     summary_model = get_python_model(SUMMARY_MODEL)
     tokenizer = summary_model["tokenizer"]
     model = summary_model["model"]
@@ -839,9 +856,7 @@ def summarize_with_decider(excerpt_text: str) -> str:
     messages = [
         {
             "role": "user",
-            "content": apply_python_generation_controls(
-                expand_prompt_placeholders(DECIDER_SUMMARY_PROMPT).replace("{excerpt_text}", excerpt_text)
-            ),
+            "content": apply_python_generation_controls(summary_prompt_for_excerpt(excerpt_text)),
         }
     ]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -854,13 +869,24 @@ def summarize_with_decider(excerpt_text: str) -> str:
             pad_token_id=tokenizer.eos_token_id,
         )
     generated = tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
-    summary = re.sub(r"\s+", " ", generated or "").strip()
-    if not summary:
-        raise ValueError("Decider summary was empty.")
-    if not summary.endswith((".", "!", "?")):
-        summary = f"{summary}."
-    return f"{summary} [END EXCERPT]"
+    return normalize_summary_text(generated)
 
+
+def summarize_with_ollama(excerpt_text: str) -> str:
+    generated = chat_once(
+        [{"role": "user", "content": summary_prompt_for_excerpt(excerpt_text)}],
+        model=SUMMARY_MODEL,
+        num_predict=DECIDER_SUMMARY_MAX_TOKENS,
+    )
+    return normalize_summary_text(generated)
+
+
+def summarize_article_excerpt(excerpt_text: str) -> str:
+    if SUMMARY_PROVIDER == "python":
+        return summarize_with_python(excerpt_text)
+    if SUMMARY_PROVIDER == "ollama":
+        return summarize_with_ollama(excerpt_text)
+    raise ValueError(f"Unsupported SUMMARY_PROVIDER={SUMMARY_PROVIDER!r}; expected 'python' or 'ollama'.")
 
 def summarize_search_result_excerpts(tool_json: str) -> str:
     parsed = parse_search_data_for_prompt(tool_json)
@@ -877,7 +903,8 @@ def summarize_search_result_excerpts(tool_json: str) -> str:
         if not excerpt:
             raise ValueError("Cannot summarize empty extracted article excerpt.")
         original_content_chars = len(str(page.get("content") or ""))
-        page["content"] = summarize_with_decider(excerpt)
+        page["content"] = summarize_article_excerpt(excerpt)
+        page["summary_provider"] = SUMMARY_PROVIDER
         page["summary_model"] = SUMMARY_MODEL
         page["summary_original_content_chars"] = str(original_content_chars)
         page["summary_content_chars"] = str(len(page["content"]))
@@ -1320,12 +1347,12 @@ class ChatSession:
             print(f"[Tool] web_search query: {search_query}")
             print(f"[Tool] result: {result}\n")
 
-        if SUMMARIZE_EXCERPTS_WITH_DECIDER:
+        if SUMMARIZE_EXCERPTS:
             summary_start = time.perf_counter()
             original_chars = len(result)
             result = summarize_search_result_excerpts(result)
             summary_ms = (time.perf_counter() - summary_start) * 1000
-            print(f"[Summaries: {summary_ms:.0f} ms, {original_chars} -> {len(result)} chars, {SUMMARY_MODEL}]")
+            print(f"[Summaries: {summary_ms:.0f} ms, {original_chars} -> {len(result)} chars, {SUMMARY_PROVIDER}, {SUMMARY_MODEL}]")
 
         llm_start = time.perf_counter()
         try:
@@ -1431,11 +1458,11 @@ def preload_models() -> None:
         get_qwen_decider()
         preload_ms = (time.perf_counter() - preload_start) * 1000
         print(f"[Decider preload: {preload_ms:.0f} ms]")
-    if SUMMARIZE_EXCERPTS_WITH_DECIDER:
+    if SUMMARIZE_EXCERPTS and SUMMARY_PROVIDER == "python":
         preload_start = time.perf_counter()
         get_python_model(SUMMARY_MODEL)
         preload_ms = (time.perf_counter() - preload_start) * 1000
-        print(f"[Summary preload: {preload_ms:.0f} ms]")
+        print(f"[Summary preload: {preload_ms:.0f} ms, {SUMMARY_PROVIDER}, {SUMMARY_MODEL}]")
     if DECIDER_RELEVANCE_ENABLED:
         preload_start = time.perf_counter()
         get_relevancy_model()
