@@ -92,10 +92,10 @@ def run_chat_job(job_id: str, session: ChatSession, message: str) -> None:
 
 
 @app.post("/api/chat")
-def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(default=None)) -> JSONResponse:
+def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, object]:
     message = req.message.strip()
     if not message:
-        return JSONResponse({"done": True, "output": ""})
+        return {"done": True, "output": ""}
 
     session_id, session = get_session(msp_session, response)
     job_id = uuid4().hex
@@ -104,7 +104,7 @@ def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(
 
     thread = threading.Thread(target=run_chat_job, args=(job_id, session, message), daemon=True)
     thread.start()
-    return JSONResponse({"job_id": job_id, "done": False})
+    return {"job_id": job_id, "done": False}
 
 
 @app.get("/api/chat/{job_id}")
