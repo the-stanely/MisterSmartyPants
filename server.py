@@ -48,7 +48,10 @@ def get_session(session_id: str | None, response: Response) -> tuple[str, ChatSe
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    response = FileResponse(STATIC_DIR / "index.html")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.get("/api/health")

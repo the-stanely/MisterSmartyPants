@@ -58,6 +58,7 @@ DECIDER_RELEVANCE_EXCERPT_CHARS = int(os.getenv("DECIDER_RELEVANCE_EXCERPT_CHARS
 RELEVANCY_MODEL = os.getenv("RELEVANCY_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 RELEVANCY_THRESHOLD = float(os.getenv("RELEVANCY_THRESHOLD", "0.0"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
+DDGS_TIMEOUT_SECONDS = int(os.getenv("DDGS_TIMEOUT_SECONDS", "20"))
 DEBUG = False
 PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
 LLM_ENABLED = os.getenv("LLM_ENABLED", "1") == "1"
@@ -480,7 +481,7 @@ def fetch_url_content(url: str, max_chars: int) -> dict[str, str]:
 def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit: int, fetch_max_chars: int) -> str:
     raw_with_modes: list[tuple[str, dict[str, Any]]] = []
     mode_errors: list[str] = []
-    with DDGS() as ddgs:
+    with DDGS(timeout=DDGS_TIMEOUT_SECONDS) as ddgs:
         if "news" in SEARCH_MODES:
             try:
                 raw_with_modes.extend(("news", row) for row in ddgs.news(query, max_results=search_limit))
