@@ -568,6 +568,91 @@ def score_fetched_pages(query: str, pages: list[dict[str, str]]) -> list[dict[st
     return sorted(ranked, key=lambda page: float(page.get("relevance_score", "0")), reverse=True)
 
 
+def print_search_candidate_debug(title: str, items: list[dict[str, str]]) -> None:
+    print(f"[{title}: {len(items)}]")
+    for index, item in enumerate(items, start=1):
+        print(f"RESULT {index}")
+        score = str(item.get("initial_relevance_score") or "").strip()
+        if score:
+            print(f"Initial score: {score}")
+        print(f"Mode: {item.get('search_mode', '')}")
+        print(f"Title: {item.get('title', '')}")
+        print(f"URL: {item.get('url', '')}")
+        published = str(item.get("published") or "").strip()
+        if published:
+            print(f"Published: {published}")
+        snippet = str(item.get("snippet") or "").strip()
+        if snippet:
+            print("Snippet:")
+            print(snippet)
+        print()
+
+
+def print_raw_ddgs_debug(raw_with_modes: list[tuple[str, dict[str, Any]]]) -> None:
+    print(f"[DDGS raw results: {len(raw_with_modes)}]")
+    for index, (mode, row) in enumerate(raw_with_modes, start=1):
+        print(f"RAW RESULT {index}")
+        print(f"Mode: {mode}")
+        if isinstance(row, dict):
+            for key in ("title", "href", "url", "date", "published", "published_date", "source", "body", "snippet"):
+                if key in row and row.get(key):
+                    print(f"{key}: {row.get(key)}")
+        else:
+            print(row)
+        print()
+
+
+def print_fetch_debug_detail(
+    item: dict[str, str],
+    page: dict[str, str],
+    fetch_ms: float,
+    status_text: str,
+    reason: str,
+) -> None:
+    print(f"[Fetch detail: {status_text}]")
+    score = str(item.get("initial_relevance_score") or "").strip()
+    if score:
+        print(f"Initial score: {score}")
+    print(f"Fetch ms: {fetch_ms:.0f}")
+    print(f"Reason: {reason}")
+    print(f"Search mode: {item.get('search_mode', '')}")
+    print(f"Search title: {item.get('title', '')}")
+    print(f"Search URL: {item.get('url', '')}")
+    snippet = str(item.get("snippet") or "").strip()
+    if snippet:
+        print("Search snippet:")
+        print(snippet)
+    print("Trafilatura title:", page.get("title", ""))
+    print("Trafilatura URL:", page.get("url", ""))
+    print("Published:", page.get("published", ""))
+    print("Author:", page.get("author", ""))
+    print("Extractor:", page.get("extractor", ""))
+    print("Extracted chars:", page.get("extracted_chars", ""))
+    print("Content chars:", page.get("content_chars", ""))
+    print("Truncated:", page.get("truncated", ""))
+    content = str(page.get("content") or "")
+    if content:
+        print("Trafilatura content:")
+        print(content)
+    print("[Fetch detail end]")
+    print()
+
+
+def print_final_rank_debug(pages: list[dict[str, str]]) -> None:
+    print(f"[Final fetched article ranking: {len(pages)}]")
+    for index, page in enumerate(pages, start=1):
+        print(f"ARTICLE {index}")
+        print(f"Final score: {page.get('relevance_score', '')}")
+        print(f"Initial score: {page.get('initial_relevance_score', '')}")
+        print(f"Search mode: {page.get('search_mode', '')}")
+        print(f"Title: {page.get('title', '')}")
+        print(f"URL: {page.get('url', '')}")
+        print(f"Published: {page.get('published', '')}")
+        print(f"Author: {page.get('author', '')}")
+        print(f"Extracted chars: {page.get('extracted_chars', '')}")
+        print(f"Content chars: {page.get('content_chars', '')}")
+        print()
+
 def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit: int, fetch_max_chars: int) -> str:
     raw_with_modes: list[tuple[str, dict[str, Any]]] = []
     mode_errors: list[str] = []
@@ -582,6 +667,9 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
                 raw_with_modes.extend(("text", row) for row in ddgs.text(query, max_results=SEARCH_TEXT_LIMIT))
             except Exception as exc:
                 mode_errors.append(f"text: {exc}")
+
+    if prompt_debug_enabled():
+        print_raw_ddgs_debug(raw_with_modes)
 
     if not raw_with_modes:
         detail = "; ".join(mode_errors) if mode_errors else "No results found."
@@ -622,9 +710,14 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
     if not search_items:
         raise RuntimeError("Search produced no usable URL candidates.")
 
+    if prompt_debug_enabled():
+        print_search_candidate_debug("Deduped DDGS candidates before rank", search_items)
+
     ranked_search_items = score_search_items(query, prioritize_search_items(search_items))
     if ranked_search_items:
         print(f"[Search rank: {len(ranked_search_items)} candidates, {RELEVANCY_MODEL if DECIDER_RELEVANCE_ENABLED else 'disabled'}]")
+        if prompt_debug_enabled():
+            print_search_candidate_debug("Initial cross-encoder search ranking", ranked_search_items)
 
     fetched_survivors: list[dict[str, str]] = []
     workers = max(1, FETCH_WORKERS)
@@ -661,21 +754,29 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
             reject_reason = post_fetch_reject_reason(query, item, page)
             if reject_reason:
                 fetch_debug.append({"url": item["url"], "status": "skip", "reason": reject_reason, "ms": f"{fetch_ms:.0f}"})
+                if prompt_debug_enabled():
+                    print_fetch_debug_detail(item, page, fetch_ms, "skip", reject_reason)
                 continue
 
             duplicate = duplicate_reason(page, fetched_survivors)
             if duplicate:
                 fetch_debug.append({"url": item["url"], "status": "skip", "reason": duplicate, "ms": f"{fetch_ms:.0f}"})
+                if prompt_debug_enabled():
+                    print_fetch_debug_detail(item, page, fetch_ms, "skip", duplicate)
                 continue
 
             fetched_survivors.append(page)
             fetch_debug.append({"url": item["url"], "status": "keep", "reason": "post-fetch ok", "ms": f"{fetch_ms:.0f}"})
+            if prompt_debug_enabled():
+                print_fetch_debug_detail(item, page, fetch_ms, "keep", "post-fetch ok")
             if len(fetched_survivors) >= survivor_limit:
                 break
 
     ranked_pages = score_fetched_pages(query, fetched_survivors)
     fetched_pages = ranked_pages[:fetch_top_n]
     print(f"[Fetch rank: {len(fetched_survivors)} survivors -> {len(fetched_pages)} sources]")
+    if prompt_debug_enabled():
+        print_final_rank_debug(ranked_pages)
 
     payload = {"search_results": ranked_search_items, "fetched_pages": fetched_pages, "fetch_debug": fetch_debug}
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -1043,10 +1144,15 @@ def decide_with_qwen(user_prompt: str, history: list[dict[str, str]]) -> tuple[b
 
 def format_decider_elapsed(elapsed_ms: float) -> str:
     if _last_qwen_scores is None:
-        return f"[Decider: {elapsed_ms:.0f} ms]"
+        return f"[Search decider finished in {elapsed_ms:.0f} ms]"
     search_score, answer_score = _last_qwen_scores
-    return f"[Decider: {elapsed_ms:.0f} ms, Search = {search_score:.3f}, Answer = {answer_score:.3f}]"
-
+    decision = "SEARCH" if search_score > answer_score else "ANSWER"
+    if prompt_debug_enabled():
+        return (
+            f"[Search decider said {decision} in {elapsed_ms:.0f} ms, "
+            f"Search = {search_score:.3f}, Answer = {answer_score:.3f}]"
+        )
+    return f"[Search decider said {decision} in {elapsed_ms:.0f} ms]"
 
 def decide_search_action(user_prompt: str, history: list[dict[str, str]]) -> tuple[bool, str, str | None]:
     global _last_qwen_scores
@@ -1320,7 +1426,7 @@ class ChatSession:
         if will_run_decider:
             print(format_decider_elapsed(decider_ms))
         elif marker:
-            print(f"[Decider: skipped, forced search marker = {marker}]")
+            print(f"[Search decider skipped; forced search marker = {marker}]")
 
         if not should_search:
             llm_start = time.perf_counter()

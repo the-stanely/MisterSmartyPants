@@ -3,7 +3,17 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MisterSmartyPants</title>
+  <title>MisterSmartyPants - A retrieval-augmented AI chat experiment.</title>
+  <meta name="description" content="MisterSmartyPants is a retrieval-augmented AI chat experiment that combines local Ollama models, web search, article extraction, relevance ranking, and summarization.">
+  <meta name="robots" content="index,follow">
+  <link rel="canonical" href="https://MisterSmartyPants.us/">
+  <meta property="og:title" content="MisterSmartyPants">
+  <meta property="og:description" content="A retrieval-augmented AI chat experiment using local models, search, extraction, ranking, and summarization.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://MisterSmartyPants.us/">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="MisterSmartyPants">
+  <meta name="twitter:description" content="A retrieval-augmented AI chat experiment using local models, search, extraction, ranking, and summarization.">
   <link rel="icon" href="/favicon.ico">
   <style>
     :root { color-scheme: light dark; font-family: Consolas, ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -23,7 +33,7 @@
 </head>
 <body>
   <main>
-    <header><h1>MisterSmartyPants</h1><div style="font-size:12px;color:#8b949e;margin-top:4px">build 2026-06-06 async-jobs</div></header>
+    <header><h1>MisterSmartyPants</h1> - A retrieval-augmented AI chat experiment.<div style="font-size:12px;color:#8b949e;margin-top:4px">build 2026-06-06 async-jobs</div></header>
     <section id="log" aria-live="polite"></section>
     <form id="chat-form">
       <textarea id="message" placeholder="Ask something or use /?" autofocus></textarea>
@@ -88,12 +98,18 @@
         while (true) {
           await sleep(1000);
           pollCount += 1;
-          current.textContent = `[working${'.'.repeat(pollCount % 4)}]`;
+          if (!current.textContent || current.textContent.startsWith('[working')) {
+            current.textContent = `[working${'.'.repeat(pollCount % 4)}]`;
+          }
           const pollRes = await fetch(`/api/chat/${encodeURIComponent(started.job_id)}`);
           const data = await readJsonResponse(pollRes);
           if (!pollRes.ok || data.error) {
             current.textContent = data.output || data.error || `HTTP ${pollRes.status}`;
             return;
+          }
+          if (data.output) {
+            current.textContent = data.output;
+            log.scrollTop = log.scrollHeight;
           }
           if (data.done) {
             current.textContent = data.output || '';

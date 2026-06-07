@@ -141,8 +141,37 @@ def new_chat(response: Response, msp_session: str | None = Cookie(default=None))
     return {"status": "cleared"}
 
 
+class LiveJobBuffer(io.TextIOBase):
+    def __init__(self, job_id: str) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.parts: list[str] = []
+        self.lock = threading.Lock()
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        with self.lock:
+            self.parts.append(text)
+            output = "".join(self.parts)
+        with jobs_lock:
+            job = jobs.get(self.job_id)
+            if job is not None:
+                job["output"] = output
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+    def getvalue(self) -> str:
+        with self.lock:
+            return "".join(self.parts)
+
 def run_chat_job(job_id: str, session: ChatSession, message: str) -> None:
-    buffer = io.StringIO()
+    buffer = LiveJobBuffer(job_id)
     error: str | None = None
     with chat_lock:
         try:
@@ -151,9 +180,8 @@ def run_chat_job(job_id: str, session: ChatSession, message: str) -> None:
         except Exception as exc:
             output = buffer.getvalue()
             if output and not output.endswith("\n"):
-                output += "\n"
-            output += f"[Server error] {type(exc).__name__}: {exc}\n"
-            buffer = io.StringIO(output)
+                buffer.write("\n")
+            buffer.write(f"[Server error] {type(exc).__name__}: {exc}\n")
             error = str(exc)
 
     with jobs_lock:
@@ -162,7 +190,6 @@ def run_chat_job(job_id: str, session: ChatSession, message: str) -> None:
             job["done"] = True
             job["output"] = buffer.getvalue()
             job["error"] = error
-
 
 @app.post("/api/chat")
 def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, object]:
