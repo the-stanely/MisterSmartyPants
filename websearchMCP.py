@@ -33,6 +33,8 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
 OLLAMA_TOP_P = float(os.getenv("OLLAMA_TOP_P", "0.9"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
+OLLAMA_NUM_THREAD_RAW = os.getenv("OLLAMA_NUM_THREAD", "").strip()
+OLLAMA_NUM_THREAD = int(OLLAMA_NUM_THREAD_RAW) if OLLAMA_NUM_THREAD_RAW else None
 QUESTION = os.getenv("QUESTION", "Wall street biggest movers.")
 SEARCH_LIMIT = 12
 FETCH_TOP_N = int(os.getenv("FETCH_TOP_N", "5"))
@@ -710,16 +712,20 @@ def chat_once(messages: list[dict[str, str]], model: str = OLLAMA_MODEL) -> str:
         print_prompt_debug(messages, serialized_messages, model)
     if not llm_enabled():
         raise LlmSkipped("LLM disabled.")
+    options = {
+        "num_ctx": OLLAMA_NUM_CTX,
+        "temperature": OLLAMA_TEMPERATURE,
+        "top_p": OLLAMA_TOP_P,
+        "num_predict": OLLAMA_NUM_PREDICT,
+    }
+    if OLLAMA_NUM_THREAD is not None:
+        options["num_thread"] = OLLAMA_NUM_THREAD
+
     payload = {
         "model": model,
         "messages": messages,
         "stream": False,
-        "options": {
-            "num_ctx": OLLAMA_NUM_CTX,
-            "temperature": OLLAMA_TEMPERATURE,
-            "top_p": OLLAMA_TOP_P,
-            "num_predict": OLLAMA_NUM_PREDICT,
-        },
+        "options": options,
     }
     response = requests.post(OLLAMA_API, json=payload, timeout=OLLAMA_TIMEOUT_SECONDS)
     response.raise_for_status()
