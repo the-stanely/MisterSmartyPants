@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import io
 import threading
+import time
 from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import Cookie, FastAPI, Response, status
+from fastapi import Cookie, FastAPI, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -20,6 +22,11 @@ sessions_lock = threading.Lock()
 jobs: dict[str, dict[str, object]] = {}
 jobs_lock = threading.Lock()
 chat_lock = threading.Lock()
+not_found_lock = threading.Lock()
+not_found_streaks: dict[str, int] = {}
+blocked_until: dict[str, float] = {}
+NOT_FOUND_BLOCK_THRESHOLD = 3
+NOT_FOUND_BLOCK_SECONDS = 10 * 60
 
 
 @asynccontextmanager
@@ -35,6 +42,56 @@ app = FastAPI(title="MisterSmartyPants", lifespan=lifespan)
 class ChatRequest(BaseModel):
     message: str
 
+
+
+def server_log(message: str) -> None:
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z%z")
+    print(f"[{timestamp}] {message}", flush=True)
+
+
+def request_ip(request: Request) -> str:
+    cf_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+    if cf_ip:
+        return cf_ip
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+    if forwarded_for:
+        return forwarded_for
+    return request.client.host if request.client else "unknown"
+
+
+@app.middleware("http")
+async def block_repeated_not_found(request: Request, call_next):
+    ip = request_ip(request)
+    now = time.monotonic()
+    with not_found_lock:
+        until = blocked_until.get(ip, 0.0)
+        if until > now:
+            remaining = max(0, int(until - now))
+            server_log(f"BLOCKED deny ip={ip} method={request.method} path={request.url.path} remaining={remaining}s")
+            return JSONResponse({"error": "Temporarily blocked"}, status_code=status.HTTP_403_FORBIDDEN)
+        if until:
+            blocked_until.pop(ip, None)
+            not_found_streaks.pop(ip, None)
+            server_log(f"BLOCK expired ip={ip}")
+
+    response = await call_next(request)
+    status_code = response.status_code
+    with not_found_lock:
+        if status_code == status.HTTP_404_NOT_FOUND:
+            streak = not_found_streaks.get(ip, 0) + 1
+            not_found_streaks[ip] = streak
+            server_log(f"REQUEST ip={ip} method={request.method} path={request.url.path} status={status_code} 404_streak={streak}")
+            if streak >= NOT_FOUND_BLOCK_THRESHOLD:
+                blocked_until[ip] = now + NOT_FOUND_BLOCK_SECONDS
+                not_found_streaks[ip] = 0
+                server_log(
+                    f"BLOCK start ip={ip} duration={NOT_FOUND_BLOCK_SECONDS}s "
+                    f"reason={NOT_FOUND_BLOCK_THRESHOLD}_consecutive_404s"
+                )
+        else:
+            not_found_streaks.pop(ip, None)
+            server_log(f"REQUEST ip={ip} method={request.method} path={request.url.path} status={status_code}")
+    return response
 
 def get_session(session_id: str | None, response: Response) -> tuple[str, ChatSession]:
     if not session_id:

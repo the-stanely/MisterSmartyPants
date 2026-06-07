@@ -249,6 +249,8 @@ The crawler files live in `static/robots.txt` and `static/sitemap.xml`. Update t
 
 The server uses an `msp_session` cookie. Each browser session gets its own `ChatSession`, including its own history and slash-command state. Chat requests run as background jobs so reverse proxies and Cloudflare do not have to hold one long request open. The browser polls job status and shows a changing `[working...]` indicator while the job runs.
 
+The server also has a small in-memory bot guard: if one client IP receives 3 consecutive 404 responses, that IP is blocked for 10 minutes. Behind Cloudflare, the server uses `CF-Connecting-IP`; behind other proxies it falls back to the first `X-Forwarded-For` value, then the socket IP. HTTP request logs are timestamped, and block start/deny/expiry events are logged explicitly.
+
 ## Reverse Proxy Notes
 
 For a public demo behind a reverse proxy, point the proxy to the local server:
