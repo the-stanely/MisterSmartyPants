@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
@@ -46,7 +47,7 @@ class ChatRequest(BaseModel):
 
 def server_log(message: str) -> None:
     timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z%z")
-    print(f"[{timestamp}] {message}", flush=True)
+    print(f"[{timestamp}] {message}", file=sys.__stdout__, flush=True)
 
 
 def request_ip(request: Request) -> str:
