@@ -862,6 +862,28 @@ def summarize_with_decider(excerpt_text: str) -> str:
     return f"{summary} [END EXCERPT]"
 
 
+def summarize_search_result_excerpts(tool_json: str) -> str:
+    parsed = parse_search_data_for_prompt(tool_json)
+    fetched_pages = parsed.get("fetched_pages", [])
+    if not isinstance(fetched_pages, list):
+        raise ValueError("Search data fetched_pages was not a list before summarization.")
+
+    for page in fetched_pages:
+        if not isinstance(page, dict):
+            continue
+        if page.get("extractor") != "trafilatura":
+            continue
+        excerpt = excerpt_body(str(page.get("content") or ""))
+        if not excerpt:
+            raise ValueError("Cannot summarize empty extracted article excerpt.")
+        original_content_chars = len(str(page.get("content") or ""))
+        page["content"] = summarize_with_decider(excerpt)
+        page["summary_model"] = SUMMARY_MODEL
+        page["summary_original_content_chars"] = str(original_content_chars)
+        page["summary_content_chars"] = str(len(page["content"]))
+
+    return json.dumps(parsed, ensure_ascii=False, indent=2)
+
 def relevance_classifier_text(page: dict[str, str]) -> str:
     metadata = [
         ("Title", str(page.get("title") or "").strip()),
