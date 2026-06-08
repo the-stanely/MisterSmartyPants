@@ -1211,6 +1211,29 @@ def validate_search_query(query: str) -> str:
     return cleaned
 
 
+def quoted_spans(text: str) -> list[str]:
+    spans = re.findall(r'"([^"\r\n]+)"', text)
+    spans.extend(re.findall(r"'([^'\r\n]+)'", text))
+    seen: set[str] = set()
+    result: list[str] = []
+    for span in spans:
+        cleaned = span.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            result.append(cleaned)
+    return result
+
+
+def restore_user_quotes(user_prompt: str, query: str) -> str:
+    restored = query
+    for span in sorted(quoted_spans(user_prompt), key=len, reverse=True):
+        if f'"{span}"' in restored or f"'{span}'" in restored:
+            continue
+        pattern = re.compile(rf"(?<![\w\"']){re.escape(span)}(?![\w\"'])")
+        restored = pattern.sub(f'"{span}"', restored)
+    return restored
+
+
 def derive_search_query(user_prompt: str) -> str:
     messages = [
         {
@@ -1220,7 +1243,7 @@ def derive_search_query(user_prompt: str) -> str:
     ]
     messages.append({"role": "user", "content": user_prompt})
     content = chat_once(messages, model=DECIDER_MODEL, num_predict=64)
-    return validate_search_query(content)
+    return restore_user_quotes(user_prompt, validate_search_query(content))
 
 
 def decide_search_needed(user_prompt: str, history: list[dict[str, str]]) -> tuple[bool, str]:
