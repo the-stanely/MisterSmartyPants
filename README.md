@@ -208,8 +208,8 @@ Inside the chat, these slash commands are available:
 /decider <prompt>  Run configured decider and query builder only; bypass rules, search, and LLM.
 /search-off        Disable search and send prompt directly to the LLM.
 /search-on         Enable search and decider logic.
-/llm-off           Skip final LLM answer after search.
-/llm-on            Enable final LLM answer after search.
+/llm-off           Skip only the final assistant answer.
+/llm-on            Enable the final assistant answer.
 /prompt-on         Show prompts and relevance inputs.
 /prompt-off        Hide prompt debug output.
 exit, quit, q      Exit.

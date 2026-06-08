@@ -201,10 +201,6 @@ _last_qwen_scores: tuple[float, float] | None = None
 console = Console()
 
 
-class LlmSkipped(RuntimeError):
-    pass
-
-
 def prompt_debug_enabled() -> bool:
     return PROMPT_DEBUG_CONTEXT.get()
 
@@ -854,8 +850,6 @@ def chat_once(messages: list[dict[str, str]], model: str = OLLAMA_MODEL, num_pre
     serialized_messages = validate_llm_messages(messages)
     if prompt_debug_enabled():
         print_prompt_debug(messages, serialized_messages, model)
-    if not llm_enabled():
-        raise LlmSkipped("LLM disabled.")
     options = {
         "num_ctx": OLLAMA_NUM_CTX,
         "temperature": OLLAMA_TEMPERATURE,
@@ -1378,8 +1372,8 @@ def print_commands() -> None:
     print("/decider <prompt>  Run configured decider and query builder only; bypass rules, search, and LLM.")
     print("/search-off        Disable search and send prompt directly to the LLM.")
     print("/search-on         Enable search and decider logic.")
-    print("/llm-off           Skip final LLM answer after search.")
-    print("/llm-on            Enable final LLM answer after search.")
+    print("/llm-off           Skip only the final assistant answer.")
+    print("/llm-on            Enable the final assistant answer.")
     print("/prompt-on         Show text sent to the answer/query LLM.")
     print("/prompt-off        Hide text sent to the answer/query LLM.")
     print("exit, quit, q      Exit.")
@@ -1418,14 +1412,14 @@ class ChatSession:
     def _run_query(self, query: str) -> None:
         if not self.search_enabled:
             llm_start = time.perf_counter()
-            try:
-                answer = answer_direct(query)
-            except LlmSkipped:
+            if not llm_enabled():
                 llm_ms = (time.perf_counter() - llm_start) * 1000
                 print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
                 print("[LLM: skipped]")
                 print()
                 return
+            try:
+                answer = answer_direct(query)
             except Exception as exc:
                 llm_ms = (time.perf_counter() - llm_start) * 1000
                 print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
@@ -1450,14 +1444,14 @@ class ChatSession:
 
         if not should_search:
             llm_start = time.perf_counter()
-            try:
-                answer = answer_from_memory(query, self.history)
-            except LlmSkipped:
+            if not llm_enabled():
                 llm_ms = (time.perf_counter() - llm_start) * 1000
                 print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
                 print("[LLM: skipped]")
                 print()
                 return
+            try:
+                answer = answer_from_memory(query, self.history)
             except Exception as exc:
                 llm_ms = (time.perf_counter() - llm_start) * 1000
                 print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
@@ -1516,14 +1510,14 @@ class ChatSession:
             print(f"[Summaries: {summary_ms:.0f} ms, {original_chars} -> {len(result)} chars, {SUMMARY_PROVIDER}, {SUMMARY_MODEL}]")
 
         llm_start = time.perf_counter()
-        try:
-            answer = answer_from_results(query, result, self.history)
-        except LlmSkipped:
+        if not llm_enabled():
             llm_ms = (time.perf_counter() - llm_start) * 1000
             print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
             print("[LLM: skipped]")
             print()
             return
+        try:
+            answer = answer_from_results(query, result, self.history)
         except Exception as exc:
             llm_ms = (time.perf_counter() - llm_start) * 1000
             print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
