@@ -6,6 +6,14 @@ This demo was developed on a slow CPU-only, memory-bound system, yet it performs
 
 This project started as a practical experiment in making local models better at current-event questions without dumping raw search results into the final LLM prompt. The current pipeline tries to keep the slow, capable model focused on clean, relevant, current source material.
 
+## Consulting / Custom AI Tools
+
+MisterSmartyPants was built as a practical local AI/search demo. If you want similar AI-enabled software for a business, research workflow, internal tool, or automation project, contact me for consulting or custom development. Email me at stan.ely.kleszczelski at Gmail.
+
+This project was built with AI-assisted development in VSCode and is intended to help others learn how local models, retrieval augmentation, search, extraction, ranking, and prompt construction can work together.
+
+If you have a problem or need help, open an issue on GitHub.
+
 ## What It Does
 
 MisterSmartyPants can run as either:
@@ -149,8 +157,10 @@ Search decision settings:
 ```env
 SEARCH_DECIDER=python
 DECIDER_MODEL=Qwen/Qwen2.5-0.5B-Instruct
-FORCE_SEARCH_MARKERS=latest,today,yesterday,current,news,recent,newest,weather,search,look up,find
+FORCE_SEARCH_MARKERS=late breaking,latest,today,yesterday,current,currently,last month,last week,new,news,newly,newest,recent,recently,weather,search,look up,find
 ```
+
+`DECIDER_MODEL` is a Hugging Face model id when `SEARCH_DECIDER=python`, and an Ollama model name when `SEARCH_DECIDER=ollama`.
 
 Summarization settings:
 
@@ -172,7 +182,7 @@ DECIDER_RELEVANCE_EXCERPT_CHARS=1200
 
 The cross-encoder is now used twice as a numeric ranker: first over DDGS result metadata before fetch, then again over extracted Trafilatura article text after post-fetch rejection. `RELEVANCY_THRESHOLD` may still exist in older `.env` files, but the current main search path ranks and selects top results instead of using it as the primary article gate.
 
-Prompt settings are also in `.env`, including the final answer prompt, query builder prompt, memory-answer prompt, search-decider prompt, and article-summary prompt. The article-summary prompt supports `{user_question}` and `{excerpt_text}` so summaries can be focused on the original request.
+Prompt settings are also in `.env`, including the final answer prompt, query builder prompt, memory-answer prompt, search-decider prompts, and article-summary prompt. The query builder uses `DECIDER_MODEL` through Ollama to rewrite conversational requests into concise search queries before DDGS runs. The Ollama search-decider prompt supports `{today_date}` and `{user_prompt}` and maps `YES` to answer from model knowledge and `NO` to search. The article-summary prompt supports `{user_question}` and `{excerpt_text}` so summaries can be focused on the original request.
 
 ## Hugging Face Token
 
@@ -195,7 +205,7 @@ Inside the chat, these slash commands are available:
 ```text
 /?                 Show commands.
 /new               Clear chat context.
-/decider <prompt>  Run Python decider only; bypass rules.
+/decider <prompt>  Run configured decider and query builder only; bypass rules, search, and LLM.
 /search-off        Disable search and send prompt directly to the LLM.
 /search-on         Enable search and decider logic.
 /llm-off           Skip final LLM answer after search.
@@ -270,11 +280,13 @@ Do not expose Ollama directly. Expose only the MisterSmartyPants HTTP server.
 
 ## Search Pipeline Details
 
-The search pipeline intentionally avoids sending raw search result dumps directly to the final LLM. Search result quality is still the weakest link when using free search backends; if the initial search candidates are poor, extraction, relevance scoring, and summarization can only recover so much. A dedicated paid search or news API will likely improve answer quality more than additional prompt tuning.
+The search pipeline intentionally avoids sending raw search result dumps directly to the final LLM. Search result quality and user question intent are still the weakest links in this workflow. MisterSmartyPants uses a free search backend; if the initial search candidates are poor, extraction, relevance scoring, and summarization can only recover so much. A dedicated paid search or news API will likely improve answer quality more than additional prompt tuning. Many search results include browser-rendered content that's difficult to extract. They include graphics, tables, sliders, etc.
+
+User intent could also use some work. My experience is that models below 1B can't reliably divine the user's intent. The decider LLM scores whether the request needs search or can be answered from model knowledge. Because of my low-end test hardware (Intel I7-8700, 16GB), a 0.5B model is used.
 
 Current behavior:
 
-1. The search decider decides whether current web data is needed.
+1. The search decider decides whether current web data is needed. A keyword intent detector is used to force obvious search cases.
 2. DDGS runs configured search modes, usually 10 news results plus 50 text results.
 3. Candidate URLs are deduplicated.
 4. A cross-encoder ranks the large search-result sample using title, URL, date, and snippet.
@@ -288,7 +300,9 @@ Current behavior:
 Useful logs include:
 
 ```text
-[Decider: nnn ms, Search = x.xxx, Answer = y.yyy]
+[Search decider said ANSWER in nnn ms]
+[Search decider said SEARCH in nnn ms, Search = x.xxx, Answer = y.yyy]
+[Query builder: nnn ms, "concise search query"]
 [Search rank: nnn candidates, model]
 [Fetch rank: nnn survivors -> 5 sources]
 [Search: nnn ms, nnn chars]
@@ -357,14 +371,6 @@ http://127.0.0.1:8080/api/health
 ```
 
 If port 8080 is already in use, edit `run-server.ps1` and your reverse proxy config to use another port.
-
-## Consulting / Custom AI Tools
-
-MisterSmartyPants was built as a practical local AI/search demo. If you want similar AI-enabled software for a business, research workflow, internal tool, or automation project, contact me for consulting or custom development. Email me at stan.ely.kleszczelski at Gmail.
-
-This project was built with AI-assisted development and is intended to help others learn how local models, search, extraction, ranking, and prompt construction can work together.
-
-If you have a problem or need help, open an issue on GitHub.
 
 ## License
 

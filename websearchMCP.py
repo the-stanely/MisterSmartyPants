@@ -33,7 +33,6 @@ def read_positive_int_env(name: str, default: str) -> int:
     return value
 OLLAMA_API = os.getenv("OLLAMA_API", "http://localhost:11434/api/chat")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "cow/gemma2_tools")
-OLLAMA_DECIDER_MODEL = os.getenv("OLLAMA_DECIDER_MODEL", "llama3.2:1b")
 OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
@@ -124,18 +123,17 @@ DEFAULT_QWEN_DECIDER_SYSTEM_PROMPT = (
 )
 QWEN_DECIDER_SYSTEM_PROMPT = os.getenv("QWEN_DECIDER_SYSTEM_PROMPT", DEFAULT_QWEN_DECIDER_SYSTEM_PROMPT)
 DEFAULT_QUERY_BUILDER_SYSTEM_PROMPT = (
-    "Convert the user request into a concise web search query. "
-    "Use prior chat context if helpful. "
-    "Return only the query text, no quotes, no JSON, no explanation."
+    "Convert this user request into a Google web search query. "
+    "Return only the query text, no quotes, no JSON, no explanation. "
+    "Use spaces between words."
 )
 QUERY_BUILDER_SYSTEM_PROMPT = os.getenv("QUERY_BUILDER_SYSTEM_PROMPT", DEFAULT_QUERY_BUILDER_SYSTEM_PROMPT)
 DEFAULT_OLLAMA_DECIDER_SYSTEM_PROMPT = (
-    "Decide if web search is required to answer the user's latest request. "
-    "Use prior chat context if relevant. "
-    "For anything time-sensitive, recent, or uncertain, choose SEARCH. "
-    "Return exactly one line in this format: DECISION|REASON. "
-    "DECISION must be either SEARCH or ANSWER. "
-    "If unsure, choose SEARCH."
+    'Today is {today_date}. This is a YES or NO question. '
+    'Say YES if you have enough knowledge to answer it. '
+    'Say NO if you need more information. '
+    '"{user_prompt}" '
+    'Output 5 tokens max.'
 )
 OLLAMA_DECIDER_SYSTEM_PROMPT = os.getenv("OLLAMA_DECIDER_SYSTEM_PROMPT", DEFAULT_OLLAMA_DECIDER_SYSTEM_PROMPT)
 DEFAULT_MEMORY_ANSWER_SYSTEM_PROMPT = (
@@ -879,9 +877,14 @@ def chat_once(messages: list[dict[str, str]], model: str = OLLAMA_MODEL, num_pre
     return ((obj.get("message") or {}).get("content") or "").strip()
 
 
-def expand_prompt_placeholders(prompt: str) -> str:
+def expand_prompt_placeholders(prompt: str, **values: str) -> str:
     now = datetime.now().astimezone()
-    return prompt.replace("{date-time}", now.strftime("%Y-%m-%d %H:%M:%S %Z%z"))
+    expanded = prompt
+    expanded = expanded.replace("{date-time}", now.strftime("%Y-%m-%d %H:%M:%S %Z%z"))
+    expanded = expanded.replace("{today_date}", now.strftime("%Y-%m-%d"))
+    for key, value in values.items():
+        expanded = expanded.replace("{" + key + "}", value)
+    return expanded
 
 
 def apply_python_generation_controls(prompt: str) -> str:
@@ -1145,11 +1148,13 @@ def decide_with_qwen(user_prompt: str, history: list[dict[str, str]]) -> tuple[b
     return False, reason, None
 
 
-def format_decider_elapsed(elapsed_ms: float) -> str:
+def format_decider_elapsed(elapsed_ms: float, decision: str | None = None) -> str:
     if _last_qwen_scores is None:
+        if decision:
+            return f"[Search decider said {decision} in {elapsed_ms:.0f} ms]"
         return f"[Search decider finished in {elapsed_ms:.0f} ms]"
     search_score, answer_score = _last_qwen_scores
-    decision = "SEARCH" if search_score > answer_score else "ANSWER"
+    decision = decision or ("SEARCH" if search_score > answer_score else "ANSWER")
     if prompt_debug_enabled():
         return (
             f"[Search decider said {decision} in {elapsed_ms:.0f} ms, "
@@ -1179,64 +1184,76 @@ def decide_search_action(user_prompt: str, history: list[dict[str, str]]) -> tup
     return should_search, reason, None
 
 
-def derive_search_query(user_prompt: str, history: list[dict[str, str]]) -> str:
+def decide_with_configured_decider(user_prompt: str) -> tuple[bool, str, str | None]:
+    global _last_qwen_scores
+
+    _last_qwen_scores = None
+    if SEARCH_DECIDER == "qwen":
+        raise ValueError("SEARCH_DECIDER=qwen is obsolete. Use SEARCH_DECIDER=python.")
+    if SEARCH_DECIDER == "python":
+        return decide_with_qwen(user_prompt, [])
+    if SEARCH_DECIDER == "ollama":
+        should_search, reason = decide_search_needed(user_prompt, [])
+        return should_search, reason, None
+    if SEARCH_DECIDER == "always":
+        return True, "SEARCH_DECIDER=always", user_prompt
+    if SEARCH_DECIDER == "rules":
+        return False, "SEARCH_DECIDER=rules has no model decider", None
+    raise ValueError(f"Unsupported SEARCH_DECIDER={SEARCH_DECIDER!r}")
+
+
+def validate_search_query(query: str) -> str:
+    cleaned = query.strip().strip('"').strip("'").strip()
+    if not cleaned:
+        raise RuntimeError("LLM query builder returned empty text.")
+    if "\n" in cleaned or "\r" in cleaned:
+        raise RuntimeError(f"LLM query builder returned multiple lines: {query!r}")
+    if cleaned.startswith("{") or cleaned.startswith("["):
+        raise RuntimeError(f"LLM query builder returned structured data: {query!r}")
+    if len(cleaned) > 200:
+        raise RuntimeError(f"LLM query builder returned an overlong query ({len(cleaned)} chars): {query!r}")
+    if re.search(r"\b(query|search query|explanation|here is|sure)\s*:", cleaned, flags=re.I):
+        raise RuntimeError(f"LLM query builder returned explanatory text: {query!r}")
+    return cleaned
+
+
+def derive_search_query(user_prompt: str) -> str:
     messages = [
         {
             "role": "system",
             "content": expand_prompt_placeholders(QUERY_BUILDER_SYSTEM_PROMPT),
         }
     ]
-    messages.extend(history)
     messages.append({"role": "user", "content": user_prompt})
-    content = chat_once(messages)
-    query = content.strip().strip('"').strip("'")
-    if not query:
-        raise RuntimeError("LLM query builder returned empty text.")
-    return query
+    content = chat_once(messages, model=DECIDER_MODEL, num_predict=64)
+    return validate_search_query(content)
 
 
 def decide_search_needed(user_prompt: str, history: list[dict[str, str]]) -> tuple[bool, str]:
-    if prompt_forces_search(user_prompt):
-        return True, "time-sensitive or explicit lookup request"
-
     messages = [
         {
             "role": "system",
-            "content": expand_prompt_placeholders(OLLAMA_DECIDER_SYSTEM_PROMPT),
+            "content": expand_prompt_placeholders(
+                OLLAMA_DECIDER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+            ),
         }
     ]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_prompt})
-    content = chat_once(messages, model=OLLAMA_DECIDER_MODEL).strip()
+    content = chat_once(
+        messages,
+        model=DECIDER_MODEL,
+        num_predict=5,
+    ).strip()
     lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
     first = lines[0] if lines else ""
-
-    # Preferred strict format: DECISION|REASON with DECISION in {SEARCH, ANSWER}
-    if "|" in first:
-        left, right = first.split("|", 1)
-        decision = left.strip().upper()
-        reason = right.strip()
-        if decision in {"SEARCH", "ANSWER"}:
-            return decision == "SEARCH", (reason or "no reason provided")
-
-    # Tolerant parsing for small models (e.g. "DECISION: SEARCH", "SEARCH - ...")
-    upper = content.upper()
-    if re.search(r"\bSEARCH\b", upper) and not re.search(r"\bANSWER\b", upper):
-        return True, content
-    if re.search(r"\bANSWER\b", upper) and not re.search(r"\bSEARCH\b", upper):
-        return False, content
-
-    # If both appear, prefer explicit "DECISION: X" marker.
-    m = re.search(r"DECISION\s*[:=]\s*(SEARCH|ANSWER)\b", upper)
-    if m:
-        return m.group(1) == "SEARCH", content
-
-    # If the model produced a substantive sentence instead of a decision token,
-    # fail closed to SEARCH to avoid fabricated or stale answers.
-    if len(content.split()) >= 5:
-        return True, f"implicit SEARCH due to unparsable decision text: {content}"
-
-    return True, f"default SEARCH due to decision parse failure: {content}"
+    normalized = re.sub(r"[^A-Za-z]+", " ", first).strip().upper().split()
+    has_yes = "YES" in normalized
+    has_no = "NO" in normalized
+    if has_yes == has_no:
+        raise ValueError(f"Ollama search decider returned unexpected text: {content!r}; expected YES or NO.")
+    if has_yes:
+        return False, f"ollama decider answered YES: {content}"
+    return True, f"ollama decider answered NO: {content}"
 
 
 def parse_search_data_for_prompt(tool_json: str) -> dict[str, Any]:
@@ -1358,7 +1375,7 @@ def print_commands() -> None:
     print("[Commands]")
     print("/?                 Show commands.")
     print("/new               Clear chat context.")
-    print("/decider <prompt>  Run Python decider only; bypass rules, bypass LLM.")
+    print("/decider <prompt>  Run configured decider and query builder only; bypass rules, search, and LLM.")
     print("/search-off        Disable search and send prompt directly to the LLM.")
     print("/search-on         Enable search and decider logic.")
     print("/llm-off           Skip final LLM answer after search.")
@@ -1427,7 +1444,7 @@ class ChatSession:
         should_search, decision_reason, search_query = decide_search_action(query, self.history)
         decider_ms = (time.perf_counter() - decider_start) * 1000
         if will_run_decider:
-            print(format_decider_elapsed(decider_ms))
+            print(format_decider_elapsed(decider_ms, "SEARCH" if should_search else "ANSWER"))
         elif marker:
             print(f"[Search decider skipped; forced search marker = {marker}]")
 
@@ -1455,16 +1472,18 @@ class ChatSession:
             self.history.append({"role": "assistant", "content": answer})
             return
 
-        if not search_query:
-            try:
-                search_query = derive_search_query(query, self.history)
-            except LlmSkipped:
-                search_query = query
-            except Exception as exc:
-                print("[Assistant]")
-                print(f"LLM query-builder failed: {exc}")
-                print()
-                return
+        query_builder_start = time.perf_counter()
+        try:
+            search_query = derive_search_query(query)
+        except Exception as exc:
+            query_builder_ms = (time.perf_counter() - query_builder_start) * 1000
+            print(f"[Query builder: {query_builder_ms:.0f} ms, failed]")
+            print("[Assistant]")
+            print(f"LLM query-builder failed: {exc}")
+            print()
+            return
+        query_builder_ms = (time.perf_counter() - query_builder_start) * 1000
+        print(f'[Query builder: {query_builder_ms:.0f} ms, "{search_query}"]')
 
         search_start = time.perf_counter()
         try:
@@ -1569,13 +1588,25 @@ class ChatSession:
             tokens = self._set_context()
             try:
                 start = time.perf_counter()
-                should_search, reason, search_query = decide_with_qwen(decider_prompt, self.history)
+                should_search, reason, search_query = decide_with_configured_decider(decider_prompt)
                 decider_ms = (time.perf_counter() - start) * 1000
             finally:
                 self._reset_context(tokens)
             decision = "SEARCH" if should_search else "ANSWER"
-            print(format_decider_elapsed(decider_ms))
+            print(format_decider_elapsed(decider_ms, decision))
             print(f"{decision} | {reason}")
+            if should_search:
+                query_builder_start = time.perf_counter()
+                try:
+                    search_query = derive_search_query(decider_prompt)
+                except Exception as exc:
+                    query_builder_ms = (time.perf_counter() - query_builder_start) * 1000
+                    print(f"[Query builder: {query_builder_ms:.0f} ms, failed]")
+                    print(f"query-builder failed: {exc}")
+                    print()
+                    return True
+                query_builder_ms = (time.perf_counter() - query_builder_start) * 1000
+                print(f'[Query builder: {query_builder_ms:.0f} ms, "{search_query}"]')
             if search_query:
                 print(f"query: {search_query}")
             print()

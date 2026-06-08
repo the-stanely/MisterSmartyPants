@@ -17,12 +17,15 @@
   <link rel="icon" href="/favicon.ico">
   <style>
     :root { color-scheme: light dark; font-family: Consolas, ui-monospace, SFMono-Regular, Menlo, monospace; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; overflow-x: hidden; }
     body { margin: 0; background: #101214; color: #e8e8e8; }
-    main { max-width: 980px; margin: 0 auto; min-height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+    main { width: 100%; max-width: 980px; margin: 0 auto; min-height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
     header { padding: 16px 18px; border-bottom: 1px solid #2b3035; }
     h1 { margin: 0; font-size: 20px; font-weight: 650; }
-    #log { padding: 16px 18px; overflow: auto; white-space: pre-wrap; line-height: 1.45; }
+    #log { padding: 16px 18px; overflow-y: auto; overflow-x: hidden; white-space: pre-wrap; line-height: 1.45; }
     .turn { margin: 0 0 18px; }
+    .user, .output, .status { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
     .user { color: #9fd3ff; }
     .output { color: #e8e8e8; }
     .status { color: #8b949e; margin-top: 4px; min-height: 1.45em; }
