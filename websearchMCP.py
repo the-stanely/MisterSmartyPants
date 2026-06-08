@@ -1376,6 +1376,8 @@ def print_commands() -> None:
     print("/llm-on            Enable the final assistant answer.")
     print("/prompt-on         Show text sent to the answer/query LLM.")
     print("/prompt-off        Hide text sent to the answer/query LLM.")
+    print("/focus-off         Web UI: stop following output while working.")
+    print("/focus-on          Web UI: follow output while working.")
     print("exit, quit, q      Exit.")
     print()
 
@@ -1571,6 +1573,14 @@ class ChatSession:
         if user_query.lower() == "/search-on":
             self.search_enabled = True
             print("[System] Search enabled.")
+            print()
+            return True
+        if user_query.lower() == "/focus-off":
+            print("[System] Focus follow disabled in the web UI.")
+            print()
+            return True
+        if user_query.lower() == "/focus-on":
+            print("[System] Focus follow enabled in the web UI.")
             print()
             return True
         if user_query.lower().startswith("/decider"):

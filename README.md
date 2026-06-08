@@ -212,6 +212,8 @@ Inside the chat, these slash commands are available:
 /llm-on            Enable the final assistant answer.
 /prompt-on         Show prompts and relevance inputs.
 /prompt-off        Hide prompt debug output.
+/focus-off         Web UI: stop following output while working.
+/focus-on          Web UI: follow output while working.
 exit, quit, q      Exit.
 ```
 
