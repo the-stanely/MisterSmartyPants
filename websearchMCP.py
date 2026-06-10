@@ -11,7 +11,7 @@ import re
 import sys
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import requests
 from ddgs import DDGS
@@ -43,7 +43,7 @@ OLLAMA_NUM_THREAD = int(OLLAMA_NUM_THREAD_RAW) if OLLAMA_NUM_THREAD_RAW else Non
 QUESTION = os.getenv("QUESTION", "Wall street biggest movers.")
 SEARCH_LIMIT = 12
 SEARCH_NEWS_LIMIT = read_positive_int_env("SEARCH_NEWS_LIMIT", "10")
-SEARCH_TEXT_LIMIT = read_positive_int_env("SEARCH_TEXT_LIMIT", "50")
+SEARCH_TEXT_LIMIT = read_positive_int_env("SEARCH_TEXT_LIMIT", "10")
 FETCH_SURVIVOR_N = read_positive_int_env("FETCH_SURVIVOR_N", "20")
 FETCH_TOP_N = read_positive_int_env("FETCH_TOP_N", "5")
 FETCH_MAX_CHARS = int(os.getenv("FETCH_MAX_CHARS", "3000"))
@@ -73,6 +73,7 @@ RELEVANCY_MODEL = os.getenv("RELEVANCY_MODEL", "cross-encoder/ms-marco-MiniLM-L-
 RELEVANCY_THRESHOLD = float(os.getenv("RELEVANCY_THRESHOLD", "0.0"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
 DDGS_TIMEOUT_SECONDS = int(os.getenv("DDGS_TIMEOUT_SECONDS", "20"))
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 DEBUG = False
 
 PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
@@ -459,7 +460,224 @@ def extract_article_content(html: str, url: str, max_chars: int) -> dict[str, st
         "truncated": "false",
     }
 
+
+GITHUB_RESERVED_PATHS = {
+    "about",
+    "collections",
+    "customer-stories",
+    "enterprise",
+    "events",
+    "explore",
+    "features",
+    "issues",
+    "login",
+    "marketplace",
+    "new",
+    "notifications",
+    "organizations",
+    "pricing",
+    "pulls",
+    "search",
+    "settings",
+    "sponsors",
+    "topics",
+    "trending",
+}
+
+
+def github_api_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "MisterSmartyPants",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return headers
+
+
+def github_api_get(path: str, params: dict[str, Any] | None = None) -> Any:
+    response = requests.get(
+        f"https://api.github.com{path}",
+        headers=github_api_headers(),
+        params=params or {},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"GitHub API HTTP {response.status_code}: {response.text[:300]}")
+    return response.json()
+
+
+def github_url_parts(url: str) -> tuple[str, str | None] | None:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host not in {"github.com", "www.github.com"}:
+        return None
+    parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+    if not parts:
+        return None
+    owner = parts[0]
+    if owner.lower() in GITHUB_RESERVED_PATHS:
+        return None
+    repo = parts[1] if len(parts) >= 2 and parts[1] else None
+    if repo and repo.lower() in GITHUB_RESERVED_PATHS:
+        repo = None
+    return owner, repo
+
+
+def format_github_datetime(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def github_repo_line(repo: dict[str, Any]) -> str:
+    pushed = format_github_datetime(repo.get("pushed_at"))
+    updated = format_github_datetime(repo.get("updated_at"))
+    language = str(repo.get("language") or "unknown")
+    description = str(repo.get("description") or "").strip()
+    details = [
+        f"Repo: {repo.get('full_name')}",
+        f"URL: {repo.get('html_url')}",
+        f"Language: {language}",
+        f"Stars: {repo.get('stargazers_count', 0)}",
+        f"Forks: {repo.get('forks_count', 0)}",
+    ]
+    if pushed:
+        details.append(f"Pushed: {pushed}")
+    if updated:
+        details.append(f"Updated: {updated}")
+    if description:
+        details.append(f"Description: {description}")
+    return "\n".join(details)
+
+
+def fetch_github_user(owner: str, source_url: str) -> dict[str, str]:
+    safe_owner = quote(owner, safe="")
+    user = github_api_get(f"/users/{safe_owner}")
+    repos = github_api_get(
+        f"/users/{safe_owner}/repos",
+        {"sort": "updated", "direction": "desc", "per_page": 10},
+    )
+    if not isinstance(repos, list):
+        repos = []
+
+    lines = [
+        f"GitHub user: {user.get('login') or owner}",
+        f"Profile URL: {user.get('html_url') or source_url}",
+    ]
+    name = str(user.get("name") or "").strip()
+    if name:
+        lines.append(f"Name: {name}")
+    bio = str(user.get("bio") or "").strip()
+    if bio:
+        lines.append(f"Bio: {bio}")
+    lines.extend(
+        [
+            f"Public repos: {user.get('public_repos', '')}",
+            f"Followers: {user.get('followers', '')}",
+            f"Following: {user.get('following', '')}",
+            f"Account created: {user.get('created_at', '')}",
+            f"Profile updated: {user.get('updated_at', '')}",
+            "",
+            "Recently updated repositories:",
+        ]
+    )
+    for repo in repos[:10]:
+        if isinstance(repo, dict):
+            lines.extend(["", github_repo_line(repo)])
+
+    content = "\n".join(lines).strip()
+    if not content.endswith("[END EXCERPT]"):
+        content = f"{content} [END EXCERPT]"
+    return {
+        "url": str(user.get("html_url") or source_url),
+        "title": f"GitHub user: {user.get('login') or owner}",
+        "author": str(user.get("login") or owner),
+        "published": str(user.get("updated_at") or ""),
+        "content": content,
+        "extractor": "github-api",
+        "extracted_chars": str(len(content)),
+        "content_chars": str(len(content)),
+        "truncated": "false",
+    }
+
+
+def fetch_github_repo(owner: str, repo: str, source_url: str) -> dict[str, str]:
+    safe_owner = quote(owner, safe="")
+    safe_repo = quote(repo, safe="")
+    repo_obj = github_api_get(f"/repos/{safe_owner}/{safe_repo}")
+    commits = github_api_get(f"/repos/{safe_owner}/{safe_repo}/commits", {"per_page": 5})
+    issues = github_api_get(
+        f"/repos/{safe_owner}/{safe_repo}/issues",
+        {"state": "open", "per_page": 5},
+    )
+    if not isinstance(commits, list):
+        commits = []
+    if not isinstance(issues, list):
+        issues = []
+
+    lines = [
+        github_repo_line(repo_obj),
+        f"Default branch: {repo_obj.get('default_branch', '')}",
+        f"Open issues count: {repo_obj.get('open_issues_count', '')}",
+        f"Created: {repo_obj.get('created_at', '')}",
+        "",
+        "Recent commits:",
+    ]
+    for commit_row in commits:
+        if not isinstance(commit_row, dict):
+            continue
+        commit = commit_row.get("commit") if isinstance(commit_row.get("commit"), dict) else {}
+        message = str(commit.get("message") or "").splitlines()[0]
+        author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
+        lines.append(
+            f"- {commit_row.get('sha', '')[:7]} {format_github_datetime(author.get('date'))} "
+            f"{author.get('name', '')}: {message}"
+        )
+
+    lines.extend(["", "Open issues and pull requests:"])
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        kind = "pull request" if issue.get("pull_request") else "issue"
+        lines.append(
+            f"- #{issue.get('number')} {kind}, updated {issue.get('updated_at')}: "
+            f"{issue.get('title')} ({issue.get('html_url')})"
+        )
+
+    content = "\n".join(lines).strip()
+    if not content.endswith("[END EXCERPT]"):
+        content = f"{content} [END EXCERPT]"
+    return {
+        "url": str(repo_obj.get("html_url") or source_url),
+        "title": f"GitHub repository: {repo_obj.get('full_name') or f'{owner}/{repo}'}",
+        "author": str(owner),
+        "published": str(repo_obj.get("pushed_at") or repo_obj.get("updated_at") or ""),
+        "content": content,
+        "extractor": "github-api",
+        "extracted_chars": str(len(content)),
+        "content_chars": str(len(content)),
+        "truncated": "false",
+    }
+
+
+def fetch_github_api_content(url: str) -> dict[str, str] | None:
+    parts = github_url_parts(url)
+    if not parts:
+        return None
+    owner, repo = parts
+    try:
+        if repo:
+            return fetch_github_repo(owner, repo, url)
+        return fetch_github_user(owner, url)
+    except Exception as exc:
+        return {"url": url, "title": url, "content": f"Fetch error: GitHub API failed: {exc}"}
+
+
 def fetch_url_content(url: str, max_chars: int) -> dict[str, str]:
+    github_page = fetch_github_api_content(url)
+    if github_page is not None:
+        return github_page
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -583,7 +801,7 @@ def print_search_candidate_debug(title: str, items: list[dict[str, str]]) -> Non
 
 
 def print_raw_ddgs_debug(raw_with_modes: list[tuple[str, dict[str, Any]]]) -> None:
-    print(f"[DDGS raw results: {len(raw_with_modes)}]")
+    print(f"[Raw search results: {len(raw_with_modes)}]")
     for index, (mode, row) in enumerate(raw_with_modes, start=1):
         print(f"RAW RESULT {index}")
         print(f"Mode: {mode}")
@@ -661,7 +879,6 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
                 raw_with_modes.extend(("text", row) for row in ddgs.text(query, max_results=SEARCH_TEXT_LIMIT))
             except Exception as exc:
                 mode_errors.append(f"text: {exc}")
-
     if prompt_debug_enabled():
         print_raw_ddgs_debug(raw_with_modes)
 
@@ -1031,7 +1248,7 @@ def summarize_search_result_excerpts(tool_json: str, user_question: str) -> str:
     for page in fetched_pages:
         if not isinstance(page, dict):
             continue
-        if page.get("extractor") != "trafilatura":
+        if not is_prompt_source(page):
             continue
         excerpt = excerpt_body(str(page.get("content") or ""))
         if not excerpt:
@@ -1044,6 +1261,12 @@ def summarize_search_result_excerpts(tool_json: str, user_question: str) -> str:
         page["summary_content_chars"] = str(len(page["content"]))
 
     return json.dumps(parsed, ensure_ascii=False, indent=2)
+
+
+def is_prompt_source(page: dict[str, Any]) -> bool:
+    extractor = str(page.get("extractor") or "")
+    return extractor == "trafilatura" or extractor.endswith("-api")
+
 
 def relevance_classifier_text(page: dict[str, str]) -> str:
     metadata = [
@@ -1306,13 +1529,13 @@ def format_search_data_for_prompt(tool_json: str) -> str:
     fetched_pages = [
         page
         for page in parsed.get("fetched_pages", [])
-        if isinstance(page, dict) and page.get("extractor") == "trafilatura"
+        if isinstance(page, dict) and is_prompt_source(page)
     ][:5]
     if not fetched_pages:
-        raise ValueError("Search produced no usable Trafilatura-extracted article sources.")
+        raise ValueError("Search produced no usable extracted or API-backed sources.")
     lines = [
         "BEGIN WEB NEWS SEARCH RESULTS",
-        "These are fetched and extracted article sources from a live web news search.",
+        "These are fetched article or API-backed sources from a live web search.",
         "Use them as current source material for the user's question.",
     ]
 
@@ -1328,6 +1551,9 @@ def format_search_data_for_prompt(tool_json: str) -> str:
         author = str(page.get("author") or "").strip()
         if author:
             lines.append(f"Author: {author}")
+        extractor = str(page.get("extractor") or "").strip()
+        if extractor:
+            lines.append(f"Extractor: {extractor}")
         lines.append("Excerpt:")
         lines.append(str(page.get("content") or "").strip())
         lines.append(f"END SOURCE {index}")
