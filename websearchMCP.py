@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import hashlib
+import html as html_module
 import json
 import os
 import re
@@ -31,6 +32,13 @@ def read_positive_int_env(name: str, default: str) -> int:
     if value < 1:
         raise ValueError(f"{name} must be 1 or greater; got {value}")
     return value
+
+
+def read_non_negative_int_env(name: str, default: str) -> int:
+    value = int(os.getenv(name, default))
+    if value < 0:
+        raise ValueError(f"{name} must be 0 or greater; got {value}")
+    return value
 OLLAMA_API = os.getenv("OLLAMA_API", "http://localhost:11434/api/chat")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "cow/gemma2_tools")
 OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
@@ -50,6 +58,9 @@ FETCH_MAX_CHARS = int(os.getenv("FETCH_MAX_CHARS", "3000"))
 FETCH_SCAN_LIMIT = read_positive_int_env("FETCH_SCAN_LIMIT", "20")
 FETCH_CANDIDATE_N = read_positive_int_env("FETCH_CANDIDATE_N", "5")
 FETCH_WORKERS = read_positive_int_env("FETCH_WORKERS", "4")
+SEARCH_META_ENRICH_ENABLED = os.getenv("SEARCH_META_ENRICH_ENABLED", "1") == "1"
+SEARCH_META_ENRICH_LIMIT_RAW = read_non_negative_int_env("SEARCH_META_ENRICH_LIMIT", "5")
+SEARCH_META_ENRICH_LIMIT: int | None = None if SEARCH_META_ENRICH_LIMIT_RAW == 0 else SEARCH_META_ENRICH_LIMIT_RAW
 SEARCH_MODES = tuple(
     mode.strip().lower()
     for mode in os.getenv("SEARCH_MODES", "news,text").split(",")
@@ -73,6 +84,12 @@ RELEVANCY_MODEL = os.getenv("RELEVANCY_MODEL", "cross-encoder/ms-marco-MiniLM-L-
 RELEVANCY_THRESHOLD = float(os.getenv("RELEVANCY_THRESHOLD", "0.0"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
 DDGS_TIMEOUT_SECONDS = int(os.getenv("DDGS_TIMEOUT_SECONDS", "20"))
+DDGS_TEXT_BACKEND = os.getenv("DDGS_TEXT_BACKEND", "duckduckgo").strip() or "duckduckgo"
+DDGS_NEWS_BACKEND = os.getenv("DDGS_NEWS_BACKEND", "duckduckgo").strip() or "duckduckgo"
+DDGS_REGION = os.getenv("DDGS_REGION", "us-en").strip() or "us-en"
+DDGS_SAFESEARCH = os.getenv("DDGS_SAFESEARCH", "moderate").strip() or "moderate"
+DDGS_TIMELIMIT_RAW = os.getenv("DDGS_TIMELIMIT", "").strip()
+DDGS_TIMELIMIT = DDGS_TIMELIMIT_RAW or None
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 DEBUG = False
 
@@ -276,6 +293,39 @@ def title_from_html(html: str, fallback: str) -> str:
     return re.sub(r"\s+", " ", title_match.group(1)).strip() or fallback
 
 
+def meta_description_from_html(html_text: str) -> str:
+    patterns = (
+        r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']',
+        r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']description["\']',
+        r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\'](.*?)["\']',
+        r'<meta[^>]+content=["\'](.*?)["\'][^>]+property=["\']og:description["\']',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html_text, flags=re.I | re.S)
+        if match:
+            return html_module.unescape(re.sub(r"\s+", " ", match.group(1)).strip())
+    return ""
+
+
+def page_metadata_description(url: str) -> str:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=True)
+        ctype = (response.headers.get("content-type") or "").lower()
+        if response.status_code >= 400:
+            return ""
+        if "text/html" not in ctype and "application/xhtml+xml" not in ctype:
+            return ""
+        return meta_description_from_html(response.text)
+    except Exception:
+        return ""
+
+
 def is_probable_ad_url(url: str) -> bool:
     parsed = urlparse(url)
     haystack = f"{parsed.netloc} {parsed.path} {parsed.query}".lower()
@@ -330,13 +380,17 @@ def has_stale_year_marker(query: str, item: dict[str, str]) -> bool:
     current_year = datetime.now().year
     requested_years = {int(year) for year in re.findall(r"\b(20\d{2})\b", query)}
     haystack = " ".join([item.get("title", ""), item.get("snippet", ""), item.get("url", ""), item.get("published", "")])
-    for year_text in re.findall(r"\b(20\d{2})\b", haystack):
-        year = int(year_text)
-        if year in requested_years:
-            continue
-        if year < current_year - 1:
-            return True
-    return False
+    years = [
+        int(year_text)
+        for year_text in re.findall(r"\b(20\d{2})\b", haystack)
+        if int(year_text) not in requested_years
+    ]
+    if not years:
+        return False
+    # Keep when any current/recent year appears; reject only when all detected years are old.
+    if any(year >= current_year - 1 for year in years):
+        return False
+    return True
 
 
 def parse_page_date(value: Any) -> datetime | None:
@@ -523,6 +577,75 @@ def github_url_parts(url: str) -> tuple[str, str | None] | None:
     if repo and repo.lower() in GITHUB_RESERVED_PATHS:
         repo = None
     return owner, repo
+
+
+def is_low_value_github_snippet(snippet: str) -> bool:
+    low = snippet.lower()
+    markers = (
+        "prevent this user from interacting",
+        "sending you notifications",
+        "learn more about blocking users",
+        "block or report",
+        "uh oh",
+        "there was an error while loading",
+    )
+    if not low.strip():
+        return True
+    return any(marker in low for marker in markers)
+
+
+def github_meta_description(url: str) -> str:
+    return page_metadata_description(url)
+
+
+def enrich_search_snippet(url: str, title: str, snippet: str) -> str:
+    if github_url_parts(url) and is_low_value_github_snippet(snippet):
+        meta_description = github_meta_description(url)
+        if meta_description:
+            return meta_description
+    return snippet
+
+
+def should_prefetch_metadata(item: dict[str, str]) -> bool:
+    if item.get("search_mode") != "text":
+        return False
+    url = str(item.get("url") or "")
+    if not url.startswith("http") or is_probable_ad_url(url) or is_root_homepage_url(url):
+        return False
+    return True
+
+
+def enrich_search_items_for_ranking(search_items: list[dict[str, str]]) -> list[dict[str, str]]:
+    if not SEARCH_META_ENRICH_ENABLED or not search_items:
+        return search_items
+
+    enriched = [dict(item) for item in search_items]
+    target_indexes = [
+        index
+        for index, item in enumerate(enriched)
+        if should_prefetch_metadata(item)
+    ]
+    if SEARCH_META_ENRICH_LIMIT is not None:
+        target_indexes = target_indexes[:SEARCH_META_ENRICH_LIMIT]
+
+    if not target_indexes:
+        return enriched
+
+    def fetch_metadata(index: int) -> tuple[int, str]:
+        item = enriched[index]
+        return index, page_metadata_description(str(item.get("url") or ""))
+
+    with ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(target_indexes))) as executor:
+        for index, description in executor.map(fetch_metadata, target_indexes):
+            if not description:
+                continue
+            original_snippet = str(enriched[index].get("snippet") or "")
+            enriched[index]["snippet"] = description
+            enriched[index]["snippet_source"] = "meta-description"
+            if original_snippet and original_snippet != description:
+                enriched[index]["snippet_original"] = original_snippet
+
+    return enriched
 
 
 def format_github_datetime(value: Any) -> str:
@@ -744,13 +867,15 @@ def post_fetch_reject_reason(query: str, item: dict[str, str], page: dict[str, s
         return "probable ad/tracking URL after redirect"
     if is_root_homepage_url(url):
         return "root homepage URL after redirect"
+    extractor = str(page.get("extractor") or "")
+    skip_stale_year_reject = extractor.endswith("-api") or github_url_parts(url) is not None
     stale_item = {
         "title": str(page.get("title") or item.get("title") or ""),
         "url": url,
         "snippet": content,
         "published": str(page.get("published") or item.get("published") or ""),
     }
-    if asks_for_current_info(query) and has_stale_year_marker(query, stale_item):
+    if asks_for_current_info(query) and not skip_stale_year_reject and has_stale_year_marker(query, stale_item):
         return "stale year marker after extraction"
     if asks_for_current_info(query) and "youtube.com" in url.lower():
         return "YouTube result for current-info query"
@@ -868,15 +993,39 @@ def print_final_rank_debug(pages: list[dict[str, str]]) -> None:
 def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit: int, fetch_max_chars: int) -> str:
     raw_with_modes: list[tuple[str, dict[str, Any]]] = []
     mode_errors: list[str] = []
+    # Normalize query format for DDGS compatibility
+    query = normalize_query_for_ddgs(query)
+    if prompt_debug_enabled():
+        print(f"[DDGS search with query: {query!r}]")
     with DDGS(timeout=DDGS_TIMEOUT_SECONDS) as ddgs:
         if "news" in SEARCH_MODES:
             try:
-                raw_with_modes.extend(("news", row) for row in ddgs.news(query, max_results=SEARCH_NEWS_LIMIT))
+                raw_with_modes.extend(
+                    ("news", row)
+                    for row in ddgs.news(
+                        query,
+                        max_results=SEARCH_NEWS_LIMIT,
+                        backend=DDGS_NEWS_BACKEND,
+                        region=DDGS_REGION,
+                        safesearch=DDGS_SAFESEARCH,
+                        timelimit=DDGS_TIMELIMIT,
+                    )
+                )
             except Exception as exc:
                 mode_errors.append(f"news: {exc}")
         if "text" in SEARCH_MODES:
             try:
-                raw_with_modes.extend(("text", row) for row in ddgs.text(query, max_results=SEARCH_TEXT_LIMIT))
+                raw_with_modes.extend(
+                    ("text", row)
+                    for row in ddgs.text(
+                        query,
+                        max_results=SEARCH_TEXT_LIMIT,
+                        backend=DDGS_TEXT_BACKEND,
+                        region=DDGS_REGION,
+                        safesearch=DDGS_SAFESEARCH,
+                        timelimit=DDGS_TIMELIMIT,
+                    )
+                )
             except Exception as exc:
                 mode_errors.append(f"text: {exc}")
     if prompt_debug_enabled():
@@ -894,12 +1043,16 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
             continue
         url = row.get("href") or row.get("url")
         title = row.get("title") or url or ""
-        snippet = row.get("body") or row.get("snippet") or ""
         if isinstance(url, str) and url.startswith("http"):
             normalized_url = url.split("#", 1)[0]
             if normalized_url in seen_urls:
                 continue
             seen_urls.add(normalized_url)
+            snippet = enrich_search_snippet(
+                normalized_url,
+                str(title),
+                str(row.get("body") or row.get("snippet") or ""),
+            )
             published = first_date_from_text(
                 row.get("date"),
                 row.get("published"),
@@ -924,7 +1077,10 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
     if prompt_debug_enabled():
         print_search_candidate_debug("Deduped DDGS candidates before rank", search_items)
 
-    ranked_search_items = score_search_items(query, prioritize_search_items(search_items))
+    ranked_search_items = score_search_items(
+        query,
+        enrich_search_items_for_ranking(prioritize_search_items(search_items)),
+    )
     if ranked_search_items:
         print(f"[Search rank: {len(ranked_search_items)} candidates, {RELEVANCY_MODEL if DECIDER_RELEVANCE_ENABLED else 'disabled'}]")
         if prompt_debug_enabled():
@@ -1455,6 +1611,14 @@ def restore_user_quotes(user_prompt: str, query: str) -> str:
         pattern = re.compile(rf"(?<![\w\"']){re.escape(span)}(?![\w\"'])")
         restored = pattern.sub(f'"{span}"', restored)
     return restored
+
+
+def normalize_query_for_ddgs(query: str) -> str:
+    """Ensure quotes in query are properly formatted for DDGS."""
+    # DDGS expects quoted phrases to work, but let's ensure consistent quote style
+    # Convert any mixed quotes to standard double quotes
+    query = query.replace("'", '"')
+    return query
 
 
 def derive_search_query(user_prompt: str) -> str:

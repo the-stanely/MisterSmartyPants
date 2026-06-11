@@ -17,20 +17,29 @@ from rich.panel import Panel
 from rich.table import Table
 
 from websearchMCP import (
+    DDGS_NEWS_BACKEND,
+    DDGS_REGION,
+    DDGS_SAFESEARCH,
+    DDGS_TEXT_BACKEND,
+    DDGS_TIMELIMIT,
     DDGS_TIMEOUT_SECONDS,
     FETCH_WORKERS,
     RELEVANCY_MODEL,
+    SEARCH_NEWS_LIMIT,
+    SEARCH_TEXT_LIMIT,
     asks_for_current_info,
+    enrich_search_items_for_ranking,
     get_relevancy_model,
     has_stale_year_marker,
     is_probable_ad_url,
     is_root_homepage_url,
+    normalize_query_for_ddgs,
 )
 
 load_dotenv(override=True)
 
-NEWS_RESULTS = 10
-TEXT_RESULTS = 50
+NEWS_RESULTS = SEARCH_NEWS_LIMIT
+TEXT_RESULTS = SEARCH_TEXT_LIMIT
 FETCH_TOP_N = 20
 FINAL_TOP_N = 5
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
@@ -99,21 +108,42 @@ def article_rank_text(article: FetchedArticle) -> str:
     return "\n".join(parts)
 
 
-def search_ddgs(query: str) -> list[SearchCandidate]:
+def search_ddgs(query: str) -> tuple[str, list[tuple[str, dict[str, Any]]], list[SearchCandidate]]:
+    effective_query = normalize_query_for_ddgs(query)
     raw: list[tuple[str, dict[str, Any]]] = []
     errors: list[str] = []
     with DDGS(timeout=DDGS_TIMEOUT_SECONDS) as ddgs:
         try:
-            raw.extend(("news", row) for row in ddgs.news(query, max_results=NEWS_RESULTS))
+            raw.extend(
+                ("news", row)
+                for row in ddgs.news(
+                    effective_query,
+                    max_results=NEWS_RESULTS,
+                    backend=DDGS_NEWS_BACKEND,
+                    region=DDGS_REGION,
+                    safesearch=DDGS_SAFESEARCH,
+                    timelimit=DDGS_TIMELIMIT,
+                )
+            )
         except Exception as exc:
             errors.append(f"news: {exc}")
         try:
-            raw.extend(("text", row) for row in ddgs.text(query, max_results=TEXT_RESULTS))
+            raw.extend(
+                ("text", row)
+                for row in ddgs.text(
+                    effective_query,
+                    max_results=TEXT_RESULTS,
+                    backend=DDGS_TEXT_BACKEND,
+                    region=DDGS_REGION,
+                    safesearch=DDGS_SAFESEARCH,
+                    timelimit=DDGS_TIMELIMIT,
+                )
+            )
         except Exception as exc:
             errors.append(f"text: {exc}")
 
     seen: set[str] = set()
-    candidates: list[SearchCandidate] = []
+    candidate_rows: list[dict[str, str]] = []
     for mode, row in raw:
         url = clean_text(row.get("href") or row.get("url"))
         if not url.startswith("http"):
@@ -122,20 +152,32 @@ def search_ddgs(query: str) -> list[SearchCandidate]:
         if normalized in seen:
             continue
         seen.add(normalized)
-        candidates.append(
-            SearchCandidate(
-                mode=mode,
-                title=clean_text(row.get("title") or normalized),
-                url=normalized,
-                snippet=clean_text(row.get("body") or row.get("snippet") or row.get("description")),
-                published=result_date(row),
-            )
+        candidate_rows.append(
+            {
+                "search_mode": mode,
+                "title": clean_text(row.get("title") or normalized),
+                "url": normalized,
+                "snippet": clean_text(row.get("body") or row.get("snippet") or row.get("description")),
+                "published": result_date(row),
+            }
         )
+
+    enriched_rows = enrich_search_items_for_ranking(candidate_rows)
+    candidates = [
+        SearchCandidate(
+            mode=str(item.get("search_mode") or ""),
+            title=clean_text(item.get("title")),
+            url=clean_text(item.get("url")),
+            snippet=clean_text(item.get("snippet")),
+            published=clean_text(item.get("published")),
+        )
+        for item in enriched_rows
+    ]
 
     if not candidates:
         detail = "; ".join(errors) if errors else "No usable results."
         raise RuntimeError(f"DDGS returned no usable candidates: {detail}")
-    return candidates
+    return effective_query, raw, candidates
 
 
 def score_candidates(query: str, candidates: list[SearchCandidate]) -> list[SearchCandidate]:
@@ -288,7 +330,9 @@ def post_trafilatura_reject_reason(query: str, article: FetchedArticle) -> str |
         return "probable ad/tracking URL after redirect"
     if is_root_homepage_url(article.final_url):
         return "root homepage URL after redirect"
-    if asks_for_current_info(query) and has_stale_year_marker(query, item):
+    host = urlparse(article.final_url).netloc.lower()
+    is_github_result = host == "github.com" or host.endswith(".github.com")
+    if asks_for_current_info(query) and not is_github_result and has_stale_year_marker(query, item):
         return "stale year marker after extraction"
     if asks_for_current_info(query) and "youtube.com" in article.final_url.lower():
         return "YouTube result for current-info query"
@@ -372,6 +416,25 @@ def print_search_table(candidates: list[SearchCandidate]) -> None:
     console.print(table)
 
 
+def print_raw_ddgs_results(raw_results: list[tuple[str, dict[str, Any]]]) -> None:
+    """Display unfiltered raw DDGS response data."""
+    console.rule(f"Raw DDGS results ({len(raw_results)} items)")
+    for index, (mode, row) in enumerate(raw_results, start=1):
+        lines = [
+            f"Mode: {mode}",
+        ]
+        if isinstance(row, dict):
+            for key in ("title", "href", "url", "date", "published", "published_date", "body", "snippet", "description", "source"):
+                if key in row and row.get(key):
+                    value = str(row[key])
+                    if len(value) > 200:
+                        value = value[:200] + "..."
+                    lines.append(f"{key}: {value}")
+        else:
+            lines.append(str(row))
+        console.print(Panel("\n".join(lines), title=f"Result {index}", expand=False))
+
+
 def print_fetches(articles: list[FetchedArticle]) -> None:
     console.rule("Up to 20 articles kept after post-Trafilatura rejecter")
     for index, article in enumerate(articles, start=1):
@@ -418,10 +481,18 @@ def print_top_picks(articles: list[FetchedArticle]) -> None:
 def run_once(query: str) -> None:
     console.rule(f"DDGS search: {query}")
     started = time.perf_counter()
-    candidates = search_ddgs(query)
+    effective_query, raw_results, candidates = search_ddgs(query)
+    console.print(f"Effective DDGS query: {effective_query}")
+    console.print(
+        f"DDGS options: text_backend={DDGS_TEXT_BACKEND}, news_backend={DDGS_NEWS_BACKEND}, "
+        f"region={DDGS_REGION}, safesearch={DDGS_SAFESEARCH}, timelimit={DDGS_TIMELIMIT or 'none'}"
+    )
     news_count = sum(1 for item in candidates if item.mode == "news")
     text_count = sum(1 for item in candidates if item.mode == "text")
     console.print(f"DDGS candidates: {len(candidates)} total ({news_count} news, {text_count} text)")
+    
+    # Display raw DDGS output first
+    print_raw_ddgs_results(raw_results)
 
     ranked_candidates = score_candidates(query, candidates)
     print_search_table(ranked_candidates)
