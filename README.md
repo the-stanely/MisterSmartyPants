@@ -179,9 +179,12 @@ Summarization settings:
 SUMMARIZE_EXCERPTS=1
 SUMMARY_PROVIDER=ollama
 SUMMARY_MODEL=gemma2:2B
+SUMMARIZE_EXCERPTS_MIN_CHARS=200000
 DECIDER_SUMMARY_MAX_TOKENS=300
 DECIDER_SUMMARY_PROMPT="User question:\n{user_question}\n...\nArticle:\n{excerpt_text}"
 ```
+
+`SUMMARIZE_EXCERPTS_MIN_CHARS` controls when the excerpt summarizer runs. Set it to `0` to summarize every search payload when `SUMMARIZE_EXCERPTS=1`, or raise it to only summarize very large result sets. For your timeout case, a threshold above the assembled search payload size will skip summarization for smaller searches and only activate it when the input gets large.
 
 Relevance ranking settings:
 

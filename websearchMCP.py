@@ -72,6 +72,7 @@ SUMMARIZE_EXCERPTS = os.getenv(
     "SUMMARIZE_EXCERPTS",
     os.getenv("SUMMARIZE_EXCERPTS_WITH_DECIDER", "1"),
 ) == "1"
+SUMMARIZE_EXCERPTS_MIN_CHARS = read_non_negative_int_env("SUMMARIZE_EXCERPTS_MIN_CHARS", "0")
 SUMMARY_PROVIDER = os.getenv("SUMMARY_PROVIDER", "python").strip().lower()
 DECIDER_SUMMARY_MAX_TOKENS = int(os.getenv("DECIDER_SUMMARY_MAX_TOKENS", "180"))
 DECIDER_SUMMARY_PROMPT = os.getenv(
@@ -1441,6 +1442,12 @@ def summarize_search_result_excerpts(tool_json: str, user_question: str) -> str:
     return json.dumps(parsed, ensure_ascii=False, indent=2)
 
 
+def should_summarize_search_data(original_chars: int) -> bool:
+    if not SUMMARIZE_EXCERPTS:
+        return False
+    return original_chars > SUMMARIZE_EXCERPTS_MIN_CHARS
+
+
 def is_prompt_source(page: dict[str, Any]) -> bool:
     extractor = str(page.get("extractor") or "")
     return extractor == "trafilatura" or extractor.endswith("-api")
@@ -1946,12 +1953,14 @@ class ChatSession:
             print(f"[Tool] web_search query: {search_query}")
             print(f"[Tool] result: {result}\n")
 
-        if SUMMARIZE_EXCERPTS:
+        if should_summarize_search_data(len(result)):
             summary_start = time.perf_counter()
             original_chars = len(result)
             result = summarize_search_result_excerpts(result, query)
             summary_ms = (time.perf_counter() - summary_start) * 1000
             print(f"[Summaries: {summary_ms:.0f} ms, {original_chars} -> {len(result)} chars, {SUMMARY_PROVIDER}, {SUMMARY_MODEL}]")
+        elif SUMMARIZE_EXCERPTS:
+            print(f"[Summaries skipped: {len(result)} chars <= {SUMMARIZE_EXCERPTS_MIN_CHARS} threshold]")
 
         llm_start = time.perf_counter()
         if not llm_enabled():

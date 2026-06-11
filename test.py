@@ -103,6 +103,28 @@ def stackexchange_search(query: str) -> dict:
         return {"error": str(exc)}
 
 
+def archive_org_search(query: str) -> dict:
+    """Search Internet Archive via Advanced Search API."""
+    try:
+        resp = requests.get(
+            "https://archive.org/advancedsearch.php",
+            params={
+                "q": query,
+                "output": "json",
+                "rows": 10,
+                "page": 1,
+                "fl[]": ["identifier", "title", "description", "date", "creator", "format"],
+            },
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        return {"error": str(exc)}
+
 
 def show_menu() -> int:
     """Display endpoint menu and return selection."""
@@ -115,14 +137,15 @@ def show_menu() -> int:
     print("4. Wikipedia")
     print("5. arXiv")
     print("6. Stack Exchange (Stack Overflow)")
+    print("7. Internet Archive")
     print("0. Exit")
     print("=" * 70)
     
     while True:
-        choice = input("Select endpoint (0-6): ").strip()
-        if choice in "0123456":
+        choice = input("Select endpoint (0-7): ").strip()
+        if choice in "01234567":
             return int(choice)
-        print("Invalid choice. Please enter 0-6.")
+        print("Invalid choice. Please enter 0-7.")
 
 
 def main() -> None:
@@ -133,6 +156,7 @@ def main() -> None:
         4: ("Wikipedia", wikipedia_search),
         5: ("arXiv", arxiv_search),
         6: ("Stack Exchange", stackexchange_search),
+        7: ("Internet Archive", archive_org_search),
     }
     
     while True:
