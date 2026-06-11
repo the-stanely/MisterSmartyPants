@@ -1646,16 +1646,13 @@ def decide_search_needed(user_prompt: str, history: list[dict[str, str]]) -> tup
     content = chat_once(
         messages,
         model=DECIDER_MODEL,
-        num_predict=5,
+        num_predict=64,
     ).strip()
-    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
-    first = lines[0] if lines else ""
-    normalized = re.sub(r"[^A-Za-z]+", " ", first).strip().upper().split()
-    has_yes = "YES" in normalized
-    has_no = "NO" in normalized
-    if has_yes == has_no:
+    label_match = re.search(r"\b(YES|NO)\b", content, flags=re.I)
+    if not label_match:
         raise ValueError(f"Ollama search decider returned unexpected text: {content!r}; expected YES or NO.")
-    if has_yes:
+    label = label_match.group(1).upper()
+    if label == "YES":
         return False, f"ollama decider answered YES: {content}"
     return True, f"ollama decider answered NO: {content}"
 
