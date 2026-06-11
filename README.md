@@ -26,10 +26,14 @@ For search-backed answers, the pipeline is roughly:
 ```text
 user question
   -> search decider (Python Transformers)
+  -> query builder (Ollama)
   -> web search (DDGS)
+  -> metadata enrichment (optional)
+  -> pre-fetch relevance rank (title/url/date/snippet)
   -> fetch candidate pages
-  -> Trafilatura article extraction
-  -> cross-encoder relevance ranking (Python sentence-transformers)
+  -> URL-based API adapters (supported domains)
+  -> fallback extraction (GitHub API, then Trafilatura)
+  -> post-fetch relevance rank (with extracted text)
   -> article summarization (Ollama by default, Python Transformers optional)
   -> final LLM answer (Python requests + Ollama HTTP API)
 ```
@@ -39,11 +43,13 @@ The goal is to reduce prompt bloat, keep poor search results away from the final
 ## Features
 
 - Local Ollama final answer model
-- Python/Transformers search decider
+- Ollama or Python/Transformers search decider
 - DDGS web search using news and text search modes
+- URL-based API adapters for Wikipedia, arXiv, Stack Exchange, and Hacker News
 - URL-aware GitHub API fetching for GitHub profile and repository results
+- Optional metadata enrichment before the first rank pass
 - Trafilatura article extraction
-- Cross-encoder relevance ranking
+- Cross-encoder relevance ranking (pre-fetch and post-fetch)
 - Configurable article summarization through Ollama or Python Transformers
 - Rich Markdown terminal rendering
 - Browser chat UI through FastAPI
@@ -134,7 +140,7 @@ Important settings:
 OLLAMA_API=http://localhost:11434/api/chat
 OLLAMA_MODEL=llama3.2:latest
 OLLAMA_TIMEOUT_SECONDS=1200
-OLLAMA_NUM_PREDICT=4096
+OLLAMA_NUM_PREDICT=2048
 OLLAMA_NUM_THREAD=
 ```
 
@@ -149,26 +155,30 @@ SEARCH_TEXT_LIMIT=10
 FETCH_TOP_N=5
 FETCH_SURVIVOR_N=20
 FETCH_WORKERS=4
+SEARCH_META_ENRICH_ENABLED=1
+SEARCH_META_ENRICH_LIMIT=5
 ```
 
 `SEARCH_NEWS_LIMIT` and `SEARCH_TEXT_LIMIT` control the initial DDGS search sample. `FETCH_SURVIVOR_N` controls how many post-Trafilatura survivors are collected before final reranking. `FETCH_TOP_N` controls how many final ranked sources are sent forward. `FETCH_WORKERS` is the fetch/extraction thread count. Lower it to reduce CPU and network pressure during article fetching; raise it to fetch more pages in parallel. `OLLAMA_NUM_THREAD` is optional; leave it blank to let Ollama choose, or set it to tune CPU threads for Ollama calls, including Ollama-based summaries.
 
+`SEARCH_META_ENRICH_ENABLED` toggles snippet enrichment from page metadata before the pre-fetch rank pass. `SEARCH_META_ENRICH_LIMIT` controls how many eligible text-mode results are enriched; set `0` for no cap.
+
 Search decision settings:
 
 ```env
-SEARCH_DECIDER=python
-DECIDER_MODEL=Qwen/Qwen2.5-0.5B-Instruct
-FORCE_SEARCH_MARKERS=late breaking,latest,today,yesterday,current,currently,last month,last week,new,news,newly,newest,recent,recently,weather,search,look up,find
+SEARCH_DECIDER=ollama
+DECIDER_MODEL=gemma2:2B
+FORCE_SEARCH_MARKERS=
 ```
 
-`DECIDER_MODEL` is a Hugging Face model id when `SEARCH_DECIDER=python`, and an Ollama model name when `SEARCH_DECIDER=ollama`.
+`DECIDER_MODEL` is a Hugging Face model id when `SEARCH_DECIDER=python`, and an Ollama model name when `SEARCH_DECIDER=ollama`. `FORCE_SEARCH_MARKERS` is a comma-separated list of keywords that force a search regardless of the decider result. It is empty by default; add terms to override the decider for obvious search queries.
 
 Summarization settings:
 
 ```env
 SUMMARIZE_EXCERPTS=1
 SUMMARY_PROVIDER=ollama
-SUMMARY_MODEL=qwen2.5:0.5b-instruct
+SUMMARY_MODEL=gemma2:2B
 DECIDER_SUMMARY_MAX_TOKENS=300
 DECIDER_SUMMARY_PROMPT="User question:\n{user_question}\n...\nArticle:\n{excerpt_text}"
 ```
@@ -184,6 +194,8 @@ DECIDER_RELEVANCE_EXCERPT_CHARS=1200
 The cross-encoder is now used twice as a numeric ranker: first over DDGS result metadata before fetch, then again over extracted Trafilatura article text after post-fetch rejection. `RELEVANCY_THRESHOLD` may still exist in older `.env` files, but the current main search path ranks and selects top results instead of using it as the primary article gate.
 
 Prompt settings are also in `.env`, including the final answer prompt, query builder prompt, memory-answer prompt, search-decider prompts, and article-summary prompt. The query builder uses `DECIDER_MODEL` through Ollama to rewrite conversational requests into concise search queries before DDGS runs. The Ollama search-decider prompt supports `{today_date}` and `{user_prompt}` and maps `YES` to answer from model knowledge and `NO` to search. The article-summary prompt supports `{user_question}` and `{excerpt_text}` so summaries can be focused on the original request.
+
+Prompt environment variables are required. Startup exits with a fatal error if any required prompt variable is missing or empty.
 
 ## Hugging Face Token
 
@@ -292,15 +304,17 @@ User intent could also use some work. My experience is that models below 1B can'
 Current behavior:
 
 1. The search decider decides whether current web data is needed. A keyword intent detector is used to force obvious search cases.
-2. DDGS runs configured search modes, usually 10 news results plus 10 text results.
-3. Candidate URLs are deduplicated.
-4. A cross-encoder ranks the large search-result sample using title, URL, date, and snippet.
-5. Pages are fetched in that ranked order until the pipeline has up to 20 post-fetch survivors or runs out of candidates.
-6. Known GitHub profile/repository URLs are fetched through the GitHub API; other pages use Trafilatura article extraction without app-level truncation.
-7. Post-fetch rejection removes fetch failures, empty/short extractions, stale current-info results using title/snippet/URL/published date, redirected homepages, ad/tracking URLs, YouTube current-info results, and near-duplicates.
-8. A cross-encoder reranks surviving extracted articles using metadata plus extracted text.
-9. The top 5 articles are summarized by the configured summary provider, usually Ollama.
-10. The final Ollama model receives the user question and summarized current source material.
+2. The query builder rewrites the prompt into a concise DDGS query.
+3. DDGS runs configured search modes, usually 10 news results plus 10 text results.
+4. Candidate URLs are deduplicated.
+5. Optional metadata enrichment updates snippets for eligible text-mode results before ranking.
+6. A cross-encoder ranks the search-result sample using title, URL, date, and snippet.
+7. Pages are fetched in ranked order until the pipeline has enough post-fetch survivors or runs out of candidates.
+8. The fetch step first tries URL-based API adapters for supported domains (Wikipedia, arXiv, Stack Exchange, Hacker News), then GitHub API for GitHub URLs, then Trafilatura for general HTML pages.
+9. Post-fetch rejection removes fetch failures, empty/short extractions, redirected homepages, ad/tracking URLs, YouTube current-info results, and near-duplicates. For current-info queries, stale-result rejection does not begin until 5 articles have already survived post-fetch checks, and freshness is based on the newer of the parsed published date or the newest non-requested year detected in the title, URL, or extracted text.
+10. A cross-encoder reranks surviving extracted articles using metadata plus extracted text.
+11. The top 5 articles are summarized by the configured summary provider, usually Ollama.
+12. The final Ollama model receives the user question and summarized current source material.
 
 Useful logs include:
 
@@ -321,7 +335,7 @@ With `/prompt-on`, relevance debug output also shows the exact metadata and extr
 
 Python models are loaded through Hugging Face and cached locally.
 
-The search decider uses local-first snapshot loading. The relevance cross-encoder also uses local-first snapshot loading. If `SUMMARY_PROVIDER=python`, the summary model uses the same local-first Hugging Face cache path. If `SUMMARY_PROVIDER=ollama`, the summary model must be available in Ollama, for example with `ollama pull qwen2.5:0.5b-instruct`.
+When `SEARCH_DECIDER=python`, the Python decider model uses local-first Hugging Face snapshot loading. The relevance cross-encoder also uses local-first snapshot loading. If `SUMMARY_PROVIDER=python`, the summary model uses the same local-first Hugging Face cache path. If `SUMMARY_PROVIDER=ollama`, the summary model must be available in Ollama, for example with `ollama pull gemma2:2b`.
 
 First run may download Python model files. Later runs should use the local Hugging Face cache.
 

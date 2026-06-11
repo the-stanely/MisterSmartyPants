@@ -26,6 +26,8 @@ try:
 except Exception:
     pass
 
+from api_adapters import route_to_api_adapter
+
 
 def read_positive_int_env(name: str, default: str) -> int:
     value = int(os.getenv(name, default))
@@ -142,6 +144,7 @@ PREFERRED_SOURCE_DOMAINS = tuple(
 )
 YAHOO_PREFERRED_LIMIT = int(os.getenv("YAHOO_PREFERRED_LIMIT", "2"))
 CURRENT_NEWS_MARKERS = ("latest", "today", "yesterday", "current", "recent", "news", "what happened")
+STALE_REJECT_MIN_SURVIVORS = 5
 TEXT_SIMILARITY_THRESHOLD = float(os.getenv("TEXT_SIMILARITY_THRESHOLD", "0.72"))
 TITLE_SIMILARITY_THRESHOLD = float(os.getenv("TITLE_SIMILARITY_THRESHOLD", "0.82"))
 STOPWORDS = {
@@ -336,21 +339,30 @@ def asks_for_current_info(query: str) -> bool:
     return any(marker in low for marker in CURRENT_NEWS_MARKERS)
 
 
-def has_stale_year_marker(query: str, item: dict[str, str]) -> bool:
-    current_year = datetime.now().year
+def newest_item_recency_date(query: str, item: dict[str, str]) -> datetime | None:
     requested_years = {int(year) for year in re.findall(r"\b(20\d{2})\b", query)}
-    haystack = " ".join([item.get("title", ""), item.get("snippet", ""), item.get("url", ""), item.get("published", "")])
-    years = [
+    haystack = " ".join([item.get("title", ""), item.get("snippet", ""), item.get("url", "")])
+    detected_years = [
         int(year_text)
         for year_text in re.findall(r"\b(20\d{2})\b", haystack)
         if int(year_text) not in requested_years
     ]
-    if not years:
+    published_date = parse_page_date(item.get("published", ""))
+    newest_year_date = None
+    if detected_years:
+        # Treat a detected year as evidence that the page was updated later than its original publish date.
+        newest_year_date = datetime(max(detected_years), 12, 31)
+    candidates = [candidate for candidate in (published_date, newest_year_date) if candidate is not None]
+    if not candidates:
+        return None
+    return max(candidates)
+
+
+def has_stale_year_marker(query: str, item: dict[str, str]) -> bool:
+    effective_date = newest_item_recency_date(query, item)
+    if effective_date is None:
         return False
-    # Keep when any current/recent year appears; reject only when all detected years are old.
-    if any(year >= current_year - 1 for year in years):
-        return False
-    return True
+    return effective_date.year < datetime.now().year - 1
 
 
 def parse_page_date(value: Any) -> datetime | None:
@@ -426,6 +438,7 @@ def duplicate_reason(page: dict[str, str], kept_pages: list[dict[str, str]]) -> 
         kept_content_tokens = token_set(kept.get("content", ""), max_tokens=220)
         title_score = jaccard_similarity(title_tokens, kept_title_tokens)
         content_score = jaccard_similarity(content_tokens, kept_content_tokens)
+        # Prefer source diversity once we already have one version of substantially the same article.
         if title_score >= TITLE_SIMILARITY_THRESHOLD:
             return f"near-duplicate title ({title_score:.2f}) of {kept.get('url', '')}"
         if content_score >= TEXT_SIMILARITY_THRESHOLD:
@@ -757,6 +770,12 @@ def fetch_github_api_content(url: str) -> dict[str, str] | None:
 
 
 def fetch_url_content(url: str, max_chars: int) -> dict[str, str]:
+    # Try specialized API adapters first (Wikipedia, arXiv, StackExchange, HN)
+    api_result = route_to_api_adapter(url)
+    if api_result is not None:
+        return api_result
+
+    # Then try GitHub API
     github_page = fetch_github_api_content(url)
     if github_page is not None:
         return github_page
@@ -815,7 +834,12 @@ def score_search_items(query: str, search_items: list[dict[str, str]]) -> list[d
     return sorted(ranked, key=lambda item: float(item.get("initial_relevance_score", "0")), reverse=True)
 
 
-def post_fetch_reject_reason(query: str, item: dict[str, str], page: dict[str, str]) -> str | None:
+def post_fetch_reject_reason(
+    query: str,
+    item: dict[str, str],
+    page: dict[str, str],
+    kept_pages: list[dict[str, str]],
+) -> str | None:
     content = str(page.get("content") or "")
     if content.startswith("Fetch error:"):
         return content
@@ -835,7 +859,14 @@ def post_fetch_reject_reason(query: str, item: dict[str, str], page: dict[str, s
         "snippet": content,
         "published": str(page.get("published") or item.get("published") or ""),
     }
-    if asks_for_current_info(query) and not skip_stale_year_reject and has_stale_year_marker(query, stale_item):
+    # Do not let freshness pruning eliminate the whole result set before we have baseline coverage.
+    has_good_articles = len(kept_pages) >= STALE_REJECT_MIN_SURVIVORS
+    if (
+        has_good_articles
+        and asks_for_current_info(query)
+        and not skip_stale_year_reject
+        and has_stale_year_marker(query, stale_item)
+    ):
         return "stale year marker after extraction"
     if asks_for_current_info(query) and "youtube.com" in url.lower():
         return "YouTube result for current-info query"
@@ -1101,6 +1132,7 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
             elif page.get("published"):
                 page["date_source"] = page.get("date_source", "extractor")
             else:
+                # Fall back to the first recognizable date in extracted text when metadata is missing.
                 inferred_date = first_date_from_text(page.get("title", ""), page.get("url", ""), page.get("content", ""))
                 if inferred_date:
                     page["published"] = inferred_date
@@ -1108,7 +1140,7 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
             page["search_mode"] = item.get("search_mode", "")
             page["initial_relevance_score"] = item.get("initial_relevance_score", "")
 
-            reject_reason = post_fetch_reject_reason(query, item, page)
+            reject_reason = post_fetch_reject_reason(query, item, page, fetched_survivors)
             if reject_reason:
                 fetch_debug.append({"url": item["url"], "status": "skip", "reason": reject_reason, "ms": f"{fetch_ms:.0f}"})
                 if prompt_debug_enabled():
