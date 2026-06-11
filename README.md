@@ -159,6 +159,7 @@ FETCH_WORKERS=4
 SEARCH_META_ENRICH_ENABLED=1
 SEARCH_META_ENRICH_LIMIT=5
 SEARCH_CONTEXT_HISTORY_MAX_CHARS=0
+SEARCH_ONLY_TOP_N=10
 APPEND_SOURCE_LINKS=1
 SOURCE_LINKS_MAX=5
 ```
@@ -170,6 +171,8 @@ SOURCE_LINKS_MAX=5
 `SEARCH_META_ENRICH_ENABLED` toggles snippet enrichment from page metadata before the pre-fetch rank pass. `SEARCH_META_ENRICH_LIMIT` controls how many eligible text-mode results are enriched; set `0` for no cap.
 
 `SEARCH_CONTEXT_HISTORY_MAX_CHARS` controls how much of each search turn's evidence block is persisted into chat history for follow-up questions (including when `/search-off` is enabled). Set `0` to keep full search context (default), or set a positive cap to limit history growth.
+
+`SEARCH_ONLY_TOP_N` controls how many ranked results search-only commands keep (for example `/search`, `/news`, `/finance`).
 
 `APPEND_SOURCE_LINKS` appends missing source URLs to answers after generation so links are present even if the model ignores prompt instructions. `SOURCE_LINKS_MAX` limits how many links are appended.
 
@@ -262,7 +265,7 @@ In the web UI, slash commands work the same way and affect only that browser ses
 
 The web input helper text shows the current state as `Search is ON/OFF. Ask something or use /?` and updates when you run `/search-on` or `/search-off`.
 
-`/search <query>` is a strict search-engine mode: it bypasses the decider, query builder, and all LLM calls. It returns a numbered list of links with deterministic summaries from the fetched pages or search snippets.
+`/search <query>` is a strict search-engine mode: it bypasses the decider, query builder, and all LLM calls. It uses DDGS result metadata and fast meta-description enrichment (no full page extraction), ranks results with the metadata relevance ranker, and returns the top `SEARCH_ONLY_TOP_N` links with summaries.
 
 `/arxiv <query>` and `/wiki <query>` are the same no-LLM mode, but with the search query biased to `arxiv.org` or `wikipedia.org/wiki` so the results stay domain-specific.
 

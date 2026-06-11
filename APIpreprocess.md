@@ -29,6 +29,16 @@ user question
   -> final answer
 ```
 
+Search-only slash commands (for example `/search`, `/news`, `/finance`) use a lighter path:
+
+```text
+user slash command
+  -> DDGS search (news/text)
+  -> fast meta-description enrichment (head-only HTML read)
+  -> metadata relevance ranking
+  -> top-N formatted link list
+```
+
 ## Why This Design
 
 Many sources are brittle under HTML scraping or bot protection.
@@ -89,6 +99,7 @@ Relevant environment settings:
 - `SEARCH_META_ENRICH_ENABLED`
 - `SEARCH_META_ENRICH_LIMIT` (`0` means unlimited)
 - `SEARCH_CONTEXT_HISTORY_MAX_CHARS` (`0` keeps full prior search context in chat history)
+- `SEARCH_ONLY_TOP_N` (max ranked results kept by search-only slash commands)
 - `APPEND_SOURCE_LINKS`
 - `SOURCE_LINKS_MAX`
 - `DDGS_TEXT_BACKEND`
@@ -110,6 +121,5 @@ The following are not implemented in the current API workflow:
 
 Potential future additions (not implemented here):
 
-- Yahoo Finance adapter
 - Additional Stack Exchange network domains
 - Optional adapter response caching
