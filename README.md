@@ -158,6 +158,8 @@ FETCH_WORKERS=4
 SEARCH_META_ENRICH_ENABLED=1
 SEARCH_META_ENRICH_LIMIT=5
 SEARCH_CONTEXT_HISTORY_MAX_CHARS=0
+APPEND_SOURCE_LINKS=1
+SOURCE_LINKS_MAX=5
 ```
 
 `SEARCH_NEWS_LIMIT` and `SEARCH_TEXT_LIMIT` control the initial DDGS search sample. `FETCH_SURVIVOR_N` controls how many post-Trafilatura survivors are collected before final reranking. `FETCH_TOP_N` controls how many final ranked sources are sent forward. `FETCH_WORKERS` is the fetch/extraction thread count. Lower it to reduce CPU and network pressure during article fetching; raise it to fetch more pages in parallel. `OLLAMA_NUM_THREAD` is optional; leave it blank to let Ollama choose, or set it to tune CPU threads for Ollama calls, including Ollama-based summaries.
@@ -165,6 +167,8 @@ SEARCH_CONTEXT_HISTORY_MAX_CHARS=0
 `SEARCH_META_ENRICH_ENABLED` toggles snippet enrichment from page metadata before the pre-fetch rank pass. `SEARCH_META_ENRICH_LIMIT` controls how many eligible text-mode results are enriched; set `0` for no cap.
 
 `SEARCH_CONTEXT_HISTORY_MAX_CHARS` controls how much of each search turn's evidence block is persisted into chat history for follow-up questions (including when `/search-off` is enabled). Set `0` to keep full search context (default), or set a positive cap to limit history growth.
+
+`APPEND_SOURCE_LINKS` appends missing source URLs to answers after generation so links are present even if the model ignores prompt instructions. `SOURCE_LINKS_MAX` limits how many links are appended.
 
 Search decision settings:
 

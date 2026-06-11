@@ -12,7 +12,7 @@ import re
 import sys
 import time
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 from ddgs import DDGS
@@ -63,6 +63,8 @@ FETCH_WORKERS = read_positive_int_env("FETCH_WORKERS", "4")
 SEARCH_META_ENRICH_ENABLED = os.getenv("SEARCH_META_ENRICH_ENABLED", "1") == "1"
 SEARCH_META_ENRICH_LIMIT_RAW = read_non_negative_int_env("SEARCH_META_ENRICH_LIMIT", "5")
 SEARCH_META_ENRICH_LIMIT: int | None = None if SEARCH_META_ENRICH_LIMIT_RAW == 0 else SEARCH_META_ENRICH_LIMIT_RAW
+APPEND_SOURCE_LINKS = os.getenv("APPEND_SOURCE_LINKS", "1") == "1"
+SOURCE_LINKS_MAX = read_positive_int_env("SOURCE_LINKS_MAX", "5")
 SEARCH_MODES = tuple(
     mode.strip().lower()
     for mode in os.getenv("SEARCH_MODES", "news,text").split(",")
@@ -1064,9 +1066,9 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
     for search_mode, row in raw_with_modes:
         if not isinstance(row, dict):
             continue
-        url = row.get("href") or row.get("url")
+        url = canonicalize_source_url(str(row.get("href") or row.get("url") or ""))
         title = row.get("title") or url or ""
-        if isinstance(url, str) and url.startswith("http"):
+        if is_real_source_url(url):
             normalized_url = url.split("#", 1)[0]
             if normalized_url in seen_urls:
                 continue
@@ -1651,6 +1653,36 @@ def normalize_query_for_ddgs(query: str) -> str:
     return query
 
 
+def canonicalize_source_url(url: str) -> str:
+    """Return the destination URL for known wrapper links when possible."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    host = (parsed.netloc or "").lower()
+    if host in {"duckduckgo.com", "www.duckduckgo.com"}:
+        params = parse_qs(parsed.query)
+        uddg = params.get("uddg")
+        if uddg and uddg[0].strip():
+            return unquote(uddg[0].strip())
+    return raw
+
+
+def is_real_source_url(url: str) -> bool:
+    candidate = canonicalize_source_url(url)
+    if not candidate:
+        return False
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    low = candidate.lower()
+    if any(marker in candidate for marker in ("{", "}", "<", ">")):
+        return False
+    if low.startswith("http://example.com") or low.startswith("https://example.com"):
+        return False
+    return True
+
+
 def derive_search_query(user_prompt: str) -> str:
     messages = [
         {
@@ -1792,6 +1824,60 @@ def answer_from_results(user_prompt: str, tool_json: str, history: list[dict[str
     return chat_once(messages)
 
 
+def source_links_from_search_json(tool_json: str, max_links: int = SOURCE_LINKS_MAX) -> list[str]:
+    parsed = parse_search_data_for_prompt(tool_json)
+    fetched_pages = [
+        page
+        for page in parsed.get("fetched_pages", [])
+        if isinstance(page, dict) and is_prompt_source(page)
+    ]
+    urls: list[str] = []
+    seen: set[str] = set()
+    for page in fetched_pages:
+        url = canonicalize_source_url(str(page.get("url") or "").strip())
+        if not is_real_source_url(url) or url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= max_links:
+            break
+    return urls
+
+
+def source_links_from_history(history: list[dict[str, str]], max_links: int = SOURCE_LINKS_MAX) -> list[str]:
+    for message in reversed(history):
+        if message.get("role") != "system":
+            continue
+        content = str(message.get("content") or "")
+        if not content.startswith("Prior web search context:\n"):
+            continue
+        urls: list[str] = []
+        seen: set[str] = set()
+        for line in content.splitlines():
+            if not line.startswith("URL:"):
+                continue
+            url = canonicalize_source_url(line[len("URL:"):].strip())
+            if not is_real_source_url(url) or url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+            if len(urls) >= max_links:
+                return urls
+        return urls
+    return []
+
+
+def append_missing_source_links(answer: str, urls: list[str]) -> str:
+    if not APPEND_SOURCE_LINKS or not urls:
+        return answer
+    answer_low = answer.lower()
+    missing = [url for url in urls if url.lower() not in answer_low]
+    if not missing:
+        return answer
+    links_block = "\n".join(f"- {url}" for url in missing)
+    return f"{answer.rstrip()}\n\nSources:\n{links_block}"
+
+
 def search_context_for_history(tool_json: str) -> str:
     """Persist prior turn web evidence in history with a bounded size."""
     search_data = format_search_data_for_prompt(tool_json)
@@ -1891,6 +1977,7 @@ class ChatSession:
                 print()
                 return
             llm_ms = (time.perf_counter() - llm_start) * 1000
+            answer = append_missing_source_links(answer, source_links_from_history(self.history))
             print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
             print_assistant_answer(answer, self.rich_output)
             self.history.append({"role": "user", "content": query})
@@ -1925,6 +2012,7 @@ class ChatSession:
                 print()
                 return
             llm_ms = (time.perf_counter() - llm_start) * 1000
+            answer = append_missing_source_links(answer, source_links_from_history(self.history))
             print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
             print_assistant_answer(answer, self.rich_output)
             self.history.append({"role": "user", "content": query})
@@ -1994,6 +2082,7 @@ class ChatSession:
             return
 
         llm_ms = (time.perf_counter() - llm_start) * 1000
+        answer = append_missing_source_links(answer, source_links_from_search_json(result))
         print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
         print_assistant_answer(answer, self.rich_output)
         prior_search_context = search_context_for_history(result)
