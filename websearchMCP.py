@@ -84,8 +84,8 @@ RELEVANCY_MODEL = os.getenv("RELEVANCY_MODEL", "cross-encoder/ms-marco-MiniLM-L-
 RELEVANCY_THRESHOLD = float(os.getenv("RELEVANCY_THRESHOLD", "0.0"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
 DDGS_TIMEOUT_SECONDS = int(os.getenv("DDGS_TIMEOUT_SECONDS", "20"))
-DDGS_TEXT_BACKEND = os.getenv("DDGS_TEXT_BACKEND", "duckduckgo").strip() or "duckduckgo"
-DDGS_NEWS_BACKEND = os.getenv("DDGS_NEWS_BACKEND", "duckduckgo").strip() or "duckduckgo"
+DDGS_TEXT_BACKEND = os.getenv("DDGS_TEXT_BACKEND", "auto").strip() or "auto"
+DDGS_NEWS_BACKEND = os.getenv("DDGS_NEWS_BACKEND", "auto").strip() or "auto"
 DDGS_REGION = os.getenv("DDGS_REGION", "us-en").strip() or "us-en"
 DDGS_SAFESEARCH = os.getenv("DDGS_SAFESEARCH", "moderate").strip() or "moderate"
 DDGS_TIMELIMIT_RAW = os.getenv("DDGS_TIMELIMIT", "").strip()
@@ -105,60 +105,20 @@ DECIDER_MODEL = os.getenv(
 )
 SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", DECIDER_MODEL)
 DECIDER_LOCAL_ONLY = os.getenv("DECIDER_LOCAL_ONLY", os.getenv("QWEN_DECIDER_LOCAL_ONLY", "0")) == "1"
-DEFAULT_ANSWER_FROM_RESULTS_PROMPT = (
-    "Today is {date-time}. Use web search data as the source of truth for current facts. "
-    "Use general knowledge only for background, historical context, and explanation. "
-    "Do not override or contradict current facts from web search data with memory. "
-    "When web sources conflict, prefer the most recent dated credible web source. "
-    "Do not dismiss newer web facts solely because older sources or memory say otherwise. "
-    "For status-changing events such as deaths, injuries, signings, or departures, newer dated reports can supersede older active-status articles. "
-    "The source list contains Trafilatura-extracted article text; use each source's title, URL, and published date when present. "
-    "Use prior chat context if relevant. "
-    "If web data is thin or conflicting, say that clearly and mention source links. "
-    "Be concise."
-)
-ANSWER_FROM_RESULTS_PROMPT = os.getenv("ANSWER_FROM_RESULTS_PROMPT", DEFAULT_ANSWER_FROM_RESULTS_PROMPT)
-DEFAULT_ANSWER_FROM_RESULTS_EXTRA_SYSTEM_PROMPT = (
-    "You have been given current web search data in this conversation. "
-    "Do not say you lack web access or cannot access current information when web search data is provided. "
-    "If the provided web search data is empty, invalid, or insufficient, say that specifically."
-)
-ANSWER_FROM_RESULTS_EXTRA_SYSTEM_PROMPT = os.getenv(
-    "ANSWER_FROM_RESULTS_EXTRA_SYSTEM_PROMPT",
-    DEFAULT_ANSWER_FROM_RESULTS_EXTRA_SYSTEM_PROMPT,
-)
-DEFAULT_QWEN_DECIDER_SYSTEM_PROMPT = (
-    "Today is {date-time}. Decide if web search is needed for the latest user request. "
-    "Return exactly one word: SEARCH or ANSWER. Do not explain. "
-    "Never return RESEARCH. SEARCH means use the internet. ANSWER means no internet. "
-    "Choose SEARCH for current, recent, local, price, score, weather, news, market, "
-    "product availability, reviews, recommendations, or uncertain factual claims. "
-    "Choose ANSWER only when stable general knowledge is enough. "
-    'Examples: "Explain why the Roman Empire fell." -> ANSWER. '
-    '"What is Nvidia stock doing today?" -> SEARCH. '
-    '"How does photosynthesis work?" -> ANSWER. '
-    '"Are reviews good for the newest Framework laptop?" -> SEARCH.'
-)
-QWEN_DECIDER_SYSTEM_PROMPT = os.getenv("QWEN_DECIDER_SYSTEM_PROMPT", DEFAULT_QWEN_DECIDER_SYSTEM_PROMPT)
-DEFAULT_QUERY_BUILDER_SYSTEM_PROMPT = (
-    "Convert this user request into a Google web search query. "
-    "Return only the query text, no quotes, no JSON, no explanation. "
-    "Use spaces between words."
-)
-QUERY_BUILDER_SYSTEM_PROMPT = os.getenv("QUERY_BUILDER_SYSTEM_PROMPT", DEFAULT_QUERY_BUILDER_SYSTEM_PROMPT)
-DEFAULT_OLLAMA_DECIDER_SYSTEM_PROMPT = (
-    'Today is {today_date}. This is a YES or NO question. '
-    'Say YES if you have enough knowledge to answer it. '
-    'Say NO if you need more information. '
-    '"{user_prompt}" '
-    'Output 5 tokens max.'
-)
-OLLAMA_DECIDER_SYSTEM_PROMPT = os.getenv("OLLAMA_DECIDER_SYSTEM_PROMPT", DEFAULT_OLLAMA_DECIDER_SYSTEM_PROMPT)
-DEFAULT_MEMORY_ANSWER_SYSTEM_PROMPT = (
-    "Answer directly from general knowledge and prior chat context only. "
-    "Do not claim web verification. Be concise."
-)
-MEMORY_ANSWER_SYSTEM_PROMPT = os.getenv("MEMORY_ANSWER_SYSTEM_PROMPT", DEFAULT_MEMORY_ANSWER_SYSTEM_PROMPT)
+def require_env_prompt(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        print(f"[FATAL] Required prompt environment variable {name!r} is missing or empty in .env.", file=sys.stderr)
+        sys.exit(1)
+    return value
+
+
+ANSWER_FROM_RESULTS_PROMPT = require_env_prompt("ANSWER_FROM_RESULTS_PROMPT")
+ANSWER_FROM_RESULTS_EXTRA_SYSTEM_PROMPT = require_env_prompt("ANSWER_FROM_RESULTS_EXTRA_SYSTEM_PROMPT")
+QWEN_DECIDER_SYSTEM_PROMPT = require_env_prompt("QWEN_DECIDER_SYSTEM_PROMPT")
+QUERY_BUILDER_SYSTEM_PROMPT = require_env_prompt("QUERY_BUILDER_SYSTEM_PROMPT")
+OLLAMA_DECIDER_SYSTEM_PROMPT = require_env_prompt("OLLAMA_DECIDER_SYSTEM_PROMPT")
+MEMORY_ANSWER_SYSTEM_PROMPT = require_env_prompt("MEMORY_ANSWER_SYSTEM_PROMPT")
 AD_URL_MARKERS = (
     "adclick",
     "adserver",
@@ -939,6 +899,66 @@ def print_raw_ddgs_debug(raw_with_modes: list[tuple[str, dict[str, Any]]]) -> No
         print()
 
 
+def print_ddgs_call_debug(query: str, raw_with_modes: list[tuple[str, dict[str, Any]]]) -> None:
+    print("[DDGS call debug]")
+    print(f"Query: {query!r}")
+    print(
+        "Params: "
+        f"timeout={DDGS_TIMEOUT_SECONDS}, "
+        f"text_backend={DDGS_TEXT_BACKEND}, news_backend={DDGS_NEWS_BACKEND}, "
+        f"region={DDGS_REGION}, safesearch={DDGS_SAFESEARCH}, timelimit={DDGS_TIMELIMIT!r}, "
+        f"text_limit={SEARCH_TEXT_LIMIT}, news_limit={SEARCH_NEWS_LIMIT}, modes={SEARCH_MODES}"
+    )
+    per_mode: dict[str, int] = {}
+    for mode, _row in raw_with_modes:
+        per_mode[mode] = per_mode.get(mode, 0) + 1
+    print(f"Raw total: {len(raw_with_modes)}; per mode: {per_mode}")
+    top_rows = [row for _mode, row in raw_with_modes if isinstance(row, dict)][:5]
+    for index, row in enumerate(top_rows, start=1):
+        title = str(row.get("title") or "").strip()
+        url = str(row.get("href") or row.get("url") or "").strip()
+        print(f"Top raw {index}: {title} | {url}")
+    print("[DDGS call debug end]")
+    print()
+
+
+def collect_ddgs_results(query: str, text_backend: str, news_backend: str) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
+    raw_with_modes: list[tuple[str, dict[str, Any]]] = []
+    mode_errors: list[str] = []
+    with DDGS(timeout=DDGS_TIMEOUT_SECONDS) as ddgs:
+        if "news" in SEARCH_MODES:
+            try:
+                raw_with_modes.extend(
+                    ("news", row)
+                    for row in ddgs.news(
+                        query,
+                        max_results=SEARCH_NEWS_LIMIT,
+                        backend=news_backend,
+                        region=DDGS_REGION,
+                        safesearch=DDGS_SAFESEARCH,
+                        timelimit=DDGS_TIMELIMIT,
+                    )
+                )
+            except Exception as exc:
+                mode_errors.append(f"news({news_backend}): {exc}")
+        if "text" in SEARCH_MODES:
+            try:
+                raw_with_modes.extend(
+                    ("text", row)
+                    for row in ddgs.text(
+                        query,
+                        max_results=SEARCH_TEXT_LIMIT,
+                        backend=text_backend,
+                        region=DDGS_REGION,
+                        safesearch=DDGS_SAFESEARCH,
+                        timelimit=DDGS_TIMELIMIT,
+                    )
+                )
+            except Exception as exc:
+                mode_errors.append(f"text({text_backend}): {exc}")
+    return raw_with_modes, mode_errors
+
+
 def print_fetch_debug_detail(
     item: dict[str, str],
     page: dict[str, str],
@@ -991,43 +1011,13 @@ def print_final_rank_debug(pages: list[dict[str, str]]) -> None:
         print()
 
 def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit: int, fetch_max_chars: int) -> str:
-    raw_with_modes: list[tuple[str, dict[str, Any]]] = []
-    mode_errors: list[str] = []
     # Normalize query format for DDGS compatibility
     query = normalize_query_for_ddgs(query)
     if prompt_debug_enabled():
         print(f"[DDGS search with query: {query!r}]")
-    with DDGS(timeout=DDGS_TIMEOUT_SECONDS) as ddgs:
-        if "news" in SEARCH_MODES:
-            try:
-                raw_with_modes.extend(
-                    ("news", row)
-                    for row in ddgs.news(
-                        query,
-                        max_results=SEARCH_NEWS_LIMIT,
-                        backend=DDGS_NEWS_BACKEND,
-                        region=DDGS_REGION,
-                        safesearch=DDGS_SAFESEARCH,
-                        timelimit=DDGS_TIMELIMIT,
-                    )
-                )
-            except Exception as exc:
-                mode_errors.append(f"news: {exc}")
-        if "text" in SEARCH_MODES:
-            try:
-                raw_with_modes.extend(
-                    ("text", row)
-                    for row in ddgs.text(
-                        query,
-                        max_results=SEARCH_TEXT_LIMIT,
-                        backend=DDGS_TEXT_BACKEND,
-                        region=DDGS_REGION,
-                        safesearch=DDGS_SAFESEARCH,
-                        timelimit=DDGS_TIMELIMIT,
-                    )
-                )
-            except Exception as exc:
-                mode_errors.append(f"text: {exc}")
+    raw_with_modes, mode_errors = collect_ddgs_results(query, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND)
+    if prompt_debug_enabled():
+        print_ddgs_call_debug(query, raw_with_modes)
     if prompt_debug_enabled():
         print_raw_ddgs_debug(raw_with_modes)
 
@@ -1630,7 +1620,17 @@ def derive_search_query(user_prompt: str) -> str:
     ]
     messages.append({"role": "user", "content": user_prompt})
     content = chat_once(messages, model=DECIDER_MODEL, num_predict=64)
-    return restore_user_quotes(user_prompt, validate_search_query(content))
+    validated = validate_search_query(content)
+    restored = restore_user_quotes(user_prompt, validated)
+    if prompt_debug_enabled():
+        print("[Query builder debug]")
+        print(f"User prompt: {user_prompt!r}")
+        print(f"Raw model output: {content!r}")
+        print(f"Validated query: {validated!r}")
+        print(f"Restored quotes query: {restored!r}")
+        print("[Query builder debug end]")
+        print()
+    return restored
 
 
 def decide_search_needed(user_prompt: str, history: list[dict[str, str]]) -> tuple[bool, str]:
