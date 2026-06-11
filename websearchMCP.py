@@ -146,6 +146,7 @@ PREFERRED_SOURCE_DOMAINS = tuple(
 YAHOO_PREFERRED_LIMIT = int(os.getenv("YAHOO_PREFERRED_LIMIT", "2"))
 CURRENT_NEWS_MARKERS = ("latest", "today", "yesterday", "current", "recent", "news", "what happened")
 STALE_REJECT_MIN_SURVIVORS = 5
+SEARCH_CONTEXT_HISTORY_MAX_CHARS = read_non_negative_int_env("SEARCH_CONTEXT_HISTORY_MAX_CHARS", "0")
 TEXT_SIMILARITY_THRESHOLD = float(os.getenv("TEXT_SIMILARITY_THRESHOLD", "0.72"))
 TITLE_SIMILARITY_THRESHOLD = float(os.getenv("TITLE_SIMILARITY_THRESHOLD", "0.82"))
 STOPWORDS = {
@@ -1791,6 +1792,17 @@ def answer_from_results(user_prompt: str, tool_json: str, history: list[dict[str
     return chat_once(messages)
 
 
+def search_context_for_history(tool_json: str) -> str:
+    """Persist prior turn web evidence in history with a bounded size."""
+    search_data = format_search_data_for_prompt(tool_json)
+    if SEARCH_CONTEXT_HISTORY_MAX_CHARS == 0:
+        return search_data
+    if len(search_data) <= SEARCH_CONTEXT_HISTORY_MAX_CHARS:
+        return search_data
+    truncated = search_data[:SEARCH_CONTEXT_HISTORY_MAX_CHARS]
+    return f"{truncated}\n\n[search context truncated for history]"
+
+
 def answer_from_memory(user_prompt: str, history: list[dict[str, str]]) -> str:
     messages = [
         {
@@ -1984,7 +1996,9 @@ class ChatSession:
         llm_ms = (time.perf_counter() - llm_start) * 1000
         print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
         print_assistant_answer(answer, self.rich_output)
+        prior_search_context = search_context_for_history(result)
         self.history.append({"role": "user", "content": query})
+        self.history.append({"role": "system", "content": f"Prior web search context:\n{prior_search_context}"})
         self.history.append({"role": "assistant", "content": answer})
 
     def handle_input(self, user_query: str) -> bool:
