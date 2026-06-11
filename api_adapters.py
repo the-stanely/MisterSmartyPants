@@ -112,8 +112,8 @@ def fetch_arxiv(url: str) -> dict[str, str] | None:
     if "arxiv.org" not in parsed.netloc:
         return None
 
-    # Extract arXiv ID from URL
-    match = re.search(r"(\d+\.\d+)", url)
+    # Extract arXiv ID from URL: handle both old format (archive/YYMMNNN) and new format (YYMM.NNNNN)
+    match = re.search(r"([a-z-]+/\d+|\d+\.\d+)", url)
     if not match:
         return None
 

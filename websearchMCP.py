@@ -1870,7 +1870,7 @@ class ChatSession:
                 print()
                 return
             try:
-                answer = answer_direct(query)
+                answer = answer_from_memory(query, self.history)
             except Exception as exc:
                 llm_ms = (time.perf_counter() - llm_start) * 1000
                 print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
@@ -1881,6 +1881,8 @@ class ChatSession:
             llm_ms = (time.perf_counter() - llm_start) * 1000
             print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
             print_assistant_answer(answer, self.rich_output)
+            self.history.append({"role": "user", "content": query})
+            self.history.append({"role": "assistant", "content": answer})
             return
 
         marker = forced_search_marker(query)
