@@ -61,7 +61,7 @@
     function appendTurn(input, output, forceScroll = false) {
       const block = document.createElement('div');
       block.className = 'turn';
-      block.innerHTML = `<div class="user">AI ready&gt; ${escapeHtml(input)}</div><div class="output">${escapeHtml(output)}</div><div class="status"></div>`;
+      block.innerHTML = `<div class="user">AI ready&gt; ${escapeHtml(input)}</div><div class="output">${renderOutputHtml(output)}</div><div class="status"></div>`;
       log.appendChild(block);
       scrollToBottom(forceScroll);
     }
@@ -72,6 +72,13 @@
 
     function escapeHtml(text) {
       return text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    }
+
+    function renderOutputHtml(text) {
+      const escaped = escapeHtml(text || '');
+      return escaped
+        .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+        .replace(/\n/g, '<br>');
     }
 
     function sleep(ms) {
@@ -133,13 +140,13 @@
         });
         const started = await readJsonResponse(res);
         if (!res.ok || started.error) {
-          current.textContent = started.output || started.error || `HTTP ${res.status}`;
+          current.innerHTML = renderOutputHtml(started.output || started.error || `HTTP ${res.status}`);
           statusLine.textContent = '';
           scrollToBottom();
           return;
         }
         if (started.done || !started.job_id) {
-          current.textContent = started.output || '';
+          current.innerHTML = renderOutputHtml(started.output || '');
           statusLine.textContent = '';
           scrollToBottom();
           return;
@@ -154,24 +161,24 @@
           const pollRes = await fetch(`/api/chat/${encodeURIComponent(started.job_id)}`);
           const data = await readJsonResponse(pollRes);
           if (!pollRes.ok || data.error) {
-            current.textContent = data.output || data.error || `HTTP ${pollRes.status}`;
+            current.innerHTML = renderOutputHtml(data.output || data.error || `HTTP ${pollRes.status}`);
             statusLine.textContent = '';
             scrollToBottom();
             return;
           }
           if (data.output) {
-            current.textContent = data.output;
+            current.innerHTML = renderOutputHtml(data.output);
             scrollToBottom();
           }
           if (data.done) {
-            current.textContent = data.output || '';
+            current.innerHTML = renderOutputHtml(data.output || '');
             statusLine.textContent = '';
             scrollToBottom();
             return;
           }
         }
       } catch (err) {
-        current.textContent = String(err);
+        current.innerHTML = renderOutputHtml(String(err));
         statusLine.textContent = '';
         scrollToBottom();
       } finally {

@@ -232,22 +232,49 @@ Inside the chat, these slash commands are available:
 
 ```text
 /?                 Show commands.
-/new               Clear chat context.
+
+[Search & Lookup]
+/arxiv <query>     Run search only against arXiv.
 /decider <prompt>  Run configured decider and query builder only; bypass rules, search, and LLM.
-/search-off        Disable search (new web fetch off). Keep answering with prior chat/search context.
-/search-on         Enable search and decider logic.
-/llm-off           Skip only the final assistant answer.
-/llm-on            Enable the final assistant answer.
-/prompt-on         Show prompts and relevance inputs.
-/prompt-off        Hide prompt debug output.
+/finance <query>   Run search only for finance news.
+/hn <query>        Run search only against Hacker News.
+/news <query>      Run search only for current news.
+/search <query>    Run search only; bypass decider, query builder, and answer LLM.
+/stack <query>     Run search only against Stack Overflow/Exchange.
+/stocks <query>    Run search only for stock market news.
+/weather <query>   Run search only for weather results for a city/state.
+/wiki <query>      Run search only against Wikipedia.
+
+[Session Controls]
 /focus-off         Web UI: stop following output while working.
-/focus-on          Web UI: follow output while working.
+/focus-on          Web UI: resume following output while working.
+/llm-off           Skip the final LLM answer.
+/llm-on            Enable the final LLM answer.
+/new               Clear chat context.
+/prompt-off        Hide text sent to the answer/query LLM.
+/prompt-on         Show text sent to the answer/query LLM.
+/search-off        Disable search; answer from prior context.
+/search-on         Enable search and decider logic.
 exit, quit, q      Exit.
 ```
 
 In the web UI, slash commands work the same way and affect only that browser session.
 
 The web input helper text shows the current state as `Search is ON/OFF. Ask something or use /?` and updates when you run `/search-on` or `/search-off`.
+
+`/search <query>` is a strict search-engine mode: it bypasses the decider, query builder, and all LLM calls. It returns a numbered list of links with deterministic summaries from the fetched pages or search snippets.
+
+`/arxiv <query>` and `/wiki <query>` are the same no-LLM mode, but with the search query biased to `arxiv.org` or `wikipedia.org/wiki` so the results stay domain-specific.
+
+`/hn <query>` and `/stack <query>` are the same no-LLM mode, but with the search query biased to Hacker News or Stack Overflow/Exchange domains.
+
+`/weather <query>` is the same no-LLM mode, but with the query biased toward general weather results. It is web-search based, not a dedicated weather API.
+
+`/news <query>` is the same no-LLM mode, but with the query biased toward current news and DDGS news results.
+
+`/finance <query>` and `/stocks <query>` are the same no-LLM mode, but with the query biased toward finance or stock market news.
+
+Yahoo is no longer treated as a preferred source in the default ranking order.
 
 ## HTTP Server
 

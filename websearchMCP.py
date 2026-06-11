@@ -101,6 +101,7 @@ DEBUG = False
 PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
 LLM_ENABLED = os.getenv("LLM_ENABLED", "1") == "1"
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "0") == "1"
+SEARCH_ONLY_TOP_N = read_positive_int_env("SEARCH_ONLY_TOP_N", "10")
 PROMPT_DEBUG_CONTEXT: ContextVar[bool] = ContextVar("PROMPT_DEBUG_CONTEXT", default=PROMPT_DEBUG)
 LLM_ENABLED_CONTEXT: ContextVar[bool] = ContextVar("LLM_ENABLED_CONTEXT", default=LLM_ENABLED)
 SEARCH_DECIDER = os.getenv("SEARCH_DECIDER", "python").strip().lower()
@@ -141,11 +142,10 @@ PREFERRED_SOURCE_DOMAINS = tuple(
     domain.strip().lower()
     for domain in os.getenv(
         "PREFERRED_SOURCE_DOMAINS",
-        "yahoo.com,wikipedia.org,usatoday.com,nytimes.com",
+        "wikipedia.org,usatoday.com,nytimes.com",
     ).split(",")
     if domain.strip()
 )
-YAHOO_PREFERRED_LIMIT = int(os.getenv("YAHOO_PREFERRED_LIMIT", "2"))
 CURRENT_NEWS_MARKERS = ("latest", "today", "yesterday", "current", "recent", "news", "what happened")
 STALE_REJECT_MIN_SURVIVORS = 5
 SEARCH_CONTEXT_HISTORY_MAX_CHARS = read_non_negative_int_env("SEARCH_CONTEXT_HISTORY_MAX_CHARS", "0")
@@ -293,6 +293,37 @@ def page_metadata_description(url: str) -> str:
         return ""
 
 
+SEARCH_ONLY_META_TIMEOUT = 5
+SEARCH_ONLY_META_READ_BYTES = 16384  # Read only the document head
+
+
+def fast_meta_description(url: str) -> str:
+    """Fetch only the first bytes of a page to extract the meta description quickly."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        with requests.get(
+            url,
+            headers=headers,
+            timeout=SEARCH_ONLY_META_TIMEOUT,
+            allow_redirects=True,
+            stream=True,
+        ) as response:
+            ctype = (response.headers.get("content-type") or "").lower()
+            if response.status_code >= 400:
+                return ""
+            if "text/html" not in ctype and "application/xhtml+xml" not in ctype:
+                return ""
+            head_html = response.raw.read(SEARCH_ONLY_META_READ_BYTES, decode_content=True).decode("utf-8", errors="replace")
+        return meta_description_from_html(head_html)
+    except Exception:
+        return ""
+
+
 def is_probable_ad_url(url: str) -> bool:
     parsed = urlparse(url)
     haystack = f"{parsed.netloc} {parsed.path} {parsed.query}".lower()
@@ -318,24 +349,17 @@ def is_domain_url(url: str, domain: str) -> bool:
 
 
 def prioritize_search_items(search_items: list[dict[str, str]]) -> list[dict[str, str]]:
-    preferred_non_yahoo: list[dict[str, str]] = []
-    preferred_yahoo: list[dict[str, str]] = []
+    preferred: list[dict[str, str]] = []
     regular: list[dict[str, str]] = []
-    extra_yahoo: list[dict[str, str]] = []
 
     for item in search_items:
         url = item["url"]
-        if is_domain_url(url, "yahoo.com"):
-            if len(preferred_yahoo) < YAHOO_PREFERRED_LIMIT:
-                preferred_yahoo.append(item)
-            else:
-                extra_yahoo.append(item)
-        elif is_preferred_source_url(url):
-            preferred_non_yahoo.append(item)
+        if is_preferred_source_url(url):
+            preferred.append(item)
         else:
             regular.append(item)
 
-    return preferred_non_yahoo + preferred_yahoo + regular + extra_yahoo
+    return preferred + regular
 
 
 def asks_for_current_info(query: str) -> bool:
@@ -1878,6 +1902,65 @@ def append_missing_source_links(answer: str, urls: list[str]) -> str:
     return f"{answer.rstrip()}\n\nSources:\n{links_block}"
 
 
+def search_summary_from_item(item: dict[str, Any]) -> str:
+    content = str(item.get("content") or "").strip()
+    snippet = str(item.get("snippet") or "").strip()
+    source_text = excerpt_body(content) if content else snippet
+    source_text = re.sub(r"\s+", " ", source_text).strip()
+    if not source_text:
+        return "No summary available."
+    return compact_text(source_text, 280)
+
+
+def search_entries_from_json(tool_json: str) -> list[dict[str, str]]:
+    parsed = parse_search_data_for_prompt(tool_json)
+    entries: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    def add_item(item: dict[str, Any]) -> None:
+        url = canonicalize_source_url(str(item.get("url") or "").strip())
+        if not is_real_source_url(url) or url in seen_urls:
+            return
+        title = str(item.get("title") or url).strip()
+        summary = search_summary_from_item(item)
+        published = str(item.get("published") or item.get("date") or "").strip()
+        entries.append({"title": title, "url": url, "summary": summary, "published": published})
+        seen_urls.add(url)
+
+    for page in parsed.get("fetched_pages", []):
+        if isinstance(page, dict):
+            add_item(page)
+
+    if len(entries) < 10:
+        for item in parsed.get("search_results", []):
+            if isinstance(item, dict):
+                add_item(item)
+            if len(entries) >= 10:
+                break
+
+    return entries
+
+
+def format_search_only_results(tool_json: str, query: str) -> str:
+    entries = search_entries_from_json(tool_json)
+    if not entries:
+        raise ValueError("Search produced no usable results.")
+
+    lines = [
+        f"Search results for: {query}",
+        "No LLM was used for this response.",
+        "",
+    ]
+    for index, entry in enumerate(entries, start=1):
+        lines.append(f"{index}. [{entry['title']}]({entry['url']})")
+        if entry.get("published"):
+            lines.append(f"   Published: {entry['published']}")
+        lines.append(f"   Summary: {entry['summary']}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
 def search_context_for_history(tool_json: str) -> str:
     """Persist prior turn web evidence in history with a bounded size."""
     search_data = format_search_data_for_prompt(tool_json)
@@ -1915,16 +1998,29 @@ def parse_args():
 def print_commands() -> None:
     print("[Commands]")
     print("/?                 Show commands.")
-    print("/new               Clear chat context.")
+    print()
+    print("[Search & Lookup]")
+    print("/arxiv <query>     Search only arXiv. Returns clickable paper links and summaries.")
     print("/decider <prompt>  Run configured decider and query builder only; bypass rules, search, and LLM.")
-    print("/search-off        Disable search and send prompt directly to the LLM.")
-    print("/search-on         Enable search and decider logic.")
-    print("/llm-off           Skip only the final assistant answer.")
-    print("/llm-on            Enable the final assistant answer.")
-    print("/prompt-on         Show text sent to the answer/query LLM.")
-    print("/prompt-off        Hide text sent to the answer/query LLM.")
+    print("/finance <query>   Search only finance news. Returns clickable links and summaries.")
+    print("/hn <query>        Search only Hacker News. Returns clickable story links and summaries.")
+    print("/news <query>      Search only current news. Returns clickable links and summaries.")
+    print("/search <query>    Search only; bypass decider, query builder, and LLM. Returns clickable links.")
+    print("/stack <query>     Search only Stack Overflow/Exchange. Returns clickable post links and summaries.")
+    print("/stocks <query>    Search only stock market news. Returns clickable links and summaries.")
+    print("/weather <query>   Search only weather for a city/state. Returns clickable links and summaries.")
+    print("/wiki <query>      Search only Wikipedia. Returns clickable page links and summaries.")
+    print()
+    print("[Session Controls]")
     print("/focus-off         Web UI: stop following output while working.")
-    print("/focus-on          Web UI: follow output while working.")
+    print("/focus-on          Web UI: resume following output while working.")
+    print("/llm-off           Skip the final LLM answer.")
+    print("/llm-on            Enable the final LLM answer.")
+    print("/new               Clear chat context.")
+    print("/prompt-off        Hide text sent to the answer/query LLM.")
+    print("/prompt-on         Show text sent to the answer/query LLM.")
+    print("/search-off        Disable search; answer from prior context.")
+    print("/search-on         Enable search and decider logic.")
     print("exit, quit, q      Exit.")
     print()
 
@@ -1955,6 +2051,75 @@ class ChatSession:
         tokens = self._set_context()
         try:
             self._run_query(query)
+        finally:
+            self._reset_context(tokens)
+
+    def run_search_only(self, query: str, query_prefix: str = "") -> None:
+        # Uses DDGS snippets enriched with fast streaming meta-description fetches.
+        # No full page extraction — short timeout prevents hangs on finance/news sites.
+        tokens = self._set_context()
+        try:
+            search_start = time.perf_counter()
+            search_query = normalize_query_for_ddgs(f"{query_prefix} {query}".strip())
+            raw_with_modes, mode_errors = collect_ddgs_results(
+                search_query, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND
+            )
+            if not raw_with_modes:
+                detail = "; ".join(mode_errors) if mode_errors else "No results found."
+                raise RuntimeError(f"Search failed: {detail}")
+
+            search_items: list[dict[str, str]] = []
+            seen_urls: set[str] = set()
+            for search_mode, row in raw_with_modes:
+                if not isinstance(row, dict):
+                    continue
+                url = canonicalize_source_url(str(row.get("href") or row.get("url") or ""))
+                if not is_real_source_url(url):
+                    continue
+                normalized_url = url.split("#", 1)[0]
+                if normalized_url in seen_urls:
+                    continue
+                seen_urls.add(normalized_url)
+                title = str(row.get("title") or normalized_url)
+                snippet = str(row.get("body") or row.get("snippet") or "")
+                published = first_date_from_text(
+                    row.get("date"), row.get("published"), title, snippet, url
+                )
+                search_items.append({
+                    "title": title,
+                    "url": normalized_url,
+                    "snippet": snippet,
+                    "published": published,
+                    "search_mode": search_mode,
+                })
+
+            if not search_items:
+                raise RuntimeError("Search produced no usable URL candidates.")
+
+            # Enrich snippets with fast meta descriptions in parallel
+            def _enrich(item: dict[str, str]) -> dict[str, str]:
+                meta = fast_meta_description(item["url"])
+                if meta:
+                    item = dict(item)
+                    item["snippet"] = meta
+                return item
+
+            with ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(search_items))) as executor:
+                search_items = list(executor.map(_enrich, search_items))
+
+            ranked_items = score_search_items(query, prioritize_search_items(search_items))
+            kept_items = ranked_items[:SEARCH_ONLY_TOP_N]
+
+            payload = {"search_results": kept_items, "fetched_pages": [], "fetch_debug": []}
+            result = json.dumps(payload, ensure_ascii=False, indent=2)
+            search_ms = (time.perf_counter() - search_start) * 1000
+            answer = format_search_only_results(result, query)
+            print(f"[Search-only: {search_ms:.0f} ms, {len(search_items)} -> {len(kept_items)} ranked results]")
+            print_assistant_answer(answer, self.rich_output)
+        except Exception as exc:
+            print("[Assistant]")
+            print(f"Search-only failed: {exc}")
+            print()
         finally:
             self._reset_context(tokens)
 
@@ -2129,6 +2294,117 @@ class ChatSession:
         if user_query.lower() == "/search-on":
             self.search_enabled = True
             print("[System] Search enabled.")
+            print()
+            return True
+        if user_query.lower().startswith("/search "):
+            search_query = user_query[len("/search "):].strip()
+            if not search_query:
+                print("[System] Usage: /search <query>")
+                print()
+                return True
+            self.run_search_only(search_query)
+            return True
+        if user_query.lower() == "/search":
+            print("[System] Usage: /search <query>")
+            print()
+            return True
+        if user_query.lower().startswith("/arxiv "):
+            search_query = user_query[len("/arxiv "):].strip()
+            if not search_query:
+                print("[System] Usage: /arxiv <query>")
+                print()
+                return True
+            self.run_search_only(search_query, "site:arxiv.org")
+            return True
+        if user_query.lower() == "/arxiv":
+            print("[System] Usage: /arxiv <query>")
+            print()
+            return True
+        if user_query.lower().startswith("/wiki "):
+            search_query = user_query[len("/wiki "):].strip()
+            if not search_query:
+                print("[System] Usage: /wiki <query>")
+                print()
+                return True
+            self.run_search_only(search_query, "site:wikipedia.org/wiki")
+            return True
+        if user_query.lower() == "/wiki":
+            print("[System] Usage: /wiki <query>")
+            print()
+            return True
+        if user_query.lower().startswith("/hn "):
+            search_query = user_query[len("/hn "):].strip()
+            if not search_query:
+                print("[System] Usage: /hn <query>")
+                print()
+                return True
+            self.run_search_only(search_query, "site:news.ycombinator.com")
+            return True
+        if user_query.lower() == "/hn":
+            print("[System] Usage: /hn <query>")
+            print()
+            return True
+        if user_query.lower().startswith("/stack "):
+            search_query = user_query[len("/stack "):].strip()
+            if not search_query:
+                print("[System] Usage: /stack <query>")
+                print()
+                return True
+            stack_prefix = (
+                "site:stackoverflow.com OR site:superuser.com OR site:serverfault.com OR site:askubuntu.com"
+            )
+            self.run_search_only(search_query, stack_prefix)
+            return True
+        if user_query.lower() == "/stack":
+            print("[System] Usage: /stack <query>")
+            print()
+            return True
+        if user_query.lower().startswith("/weather "):
+            search_query = user_query[len("/weather "):].strip()
+            if not search_query:
+                print("[System] Usage: /weather <city, state>")
+                print()
+                return True
+            self.run_search_only(search_query, "weather")
+            return True
+        if user_query.lower() == "/weather":
+            print("[System] Usage: /weather <city, state>")
+            print()
+            return True
+        if user_query.lower().startswith("/news "):
+            search_query = user_query[len("/news "):].strip()
+            if not search_query:
+                print("[System] Usage: /news <query>")
+                print()
+                return True
+            self.run_search_only(search_query, "news")
+            return True
+        if user_query.lower() == "/news":
+            print("[System] Usage: /news <query>")
+            print()
+            return True
+        if user_query.lower().startswith("/finance "):
+            search_query = user_query[len("/finance "):].strip()
+            if not search_query:
+                print("[System] Usage: /finance <query>")
+                print()
+                return True
+            self.run_search_only(search_query, "finance stock market")
+            return True
+        if user_query.lower() == "/finance":
+            print("[System] Usage: /finance <query>")
+            print()
+            return True
+        if user_query.lower().startswith("/stocks "):
+            search_query = user_query[len("/stocks "):].strip()
+            if not search_query:
+                print("[System] Usage: /stocks <query>")
+                print()
+                return True
+            self.run_search_only(search_query, "stock market")
+            return True
+        if user_query.lower() == "/stocks":
+            print("[System] Usage: /stocks <query>")
             print()
             return True
         if user_query.lower() == "/focus-off":
