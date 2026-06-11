@@ -40,7 +40,7 @@
     <header><h1>MisterSmartyPants</h1> - A retrieval-augmented AI chat experiment.<div style="font-size:12px;color:#8b949e;margin-top:4px">build 2026-06-06 async-jobs</div></header>
     <section id="log" aria-live="polite"></section>
     <form id="chat-form">
-      <textarea id="message" placeholder="Ask something or use /?" autofocus></textarea>
+      <textarea id="message" placeholder="Search is OFF. Ask something or use /?" autofocus></textarea>
       <button id="send" type="submit">Send</button>
     </form>
   </main>
@@ -50,6 +50,13 @@
     const log = document.getElementById('log');
     const send = document.getElementById('send');
     let focusFollow = true;
+    let searchEnabled = false;
+
+    function updateMessagePlaceholder() {
+      message.placeholder = `Search is ${searchEnabled ? 'ON' : 'OFF'}. Ask something or use /?`;
+    }
+
+    updateMessagePlaceholder();
 
     function appendTurn(input, output, forceScroll = false) {
       const block = document.createElement('div');
@@ -102,6 +109,14 @@
         scrollToBottom(true);
         message.focus();
         return;
+      }
+      if (text.toLowerCase() === '/search-on') {
+        searchEnabled = true;
+        updateMessagePlaceholder();
+      }
+      if (text.toLowerCase() === '/search-off') {
+        searchEnabled = false;
+        updateMessagePlaceholder();
       }
       send.disabled = true;
       appendTurn(text, '');

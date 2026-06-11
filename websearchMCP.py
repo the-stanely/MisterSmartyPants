@@ -100,7 +100,7 @@ DEBUG = False
 
 PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
 LLM_ENABLED = os.getenv("LLM_ENABLED", "1") == "1"
-SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1") == "1"
+SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "0") == "1"
 PROMPT_DEBUG_CONTEXT: ContextVar[bool] = ContextVar("PROMPT_DEBUG_CONTEXT", default=PROMPT_DEBUG)
 LLM_ENABLED_CONTEXT: ContextVar[bool] = ContextVar("LLM_ENABLED_CONTEXT", default=LLM_ENABLED)
 SEARCH_DECIDER = os.getenv("SEARCH_DECIDER", "python").strip().lower()

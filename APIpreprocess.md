@@ -85,8 +85,12 @@ Notes:
 
 Relevant environment settings:
 
+- `SEARCH_ENABLED` (`0` starts new sessions with search OFF)
 - `SEARCH_META_ENRICH_ENABLED`
 - `SEARCH_META_ENRICH_LIMIT` (`0` means unlimited)
+- `SEARCH_CONTEXT_HISTORY_MAX_CHARS` (`0` keeps full prior search context in chat history)
+- `APPEND_SOURCE_LINKS`
+- `SOURCE_LINKS_MAX`
 - `DDGS_TEXT_BACKEND`
 - `DDGS_NEWS_BACKEND`
 

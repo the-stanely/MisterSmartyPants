@@ -149,6 +149,7 @@ OLLAMA_NUM_THREAD=
 Search and fetch settings:
 
 ```env
+SEARCH_ENABLED=0
 SEARCH_MODES=news,text
 SEARCH_NEWS_LIMIT=10
 SEARCH_TEXT_LIMIT=10
@@ -163,6 +164,8 @@ SOURCE_LINKS_MAX=5
 ```
 
 `SEARCH_NEWS_LIMIT` and `SEARCH_TEXT_LIMIT` control the initial DDGS search sample. `FETCH_SURVIVOR_N` controls how many post-Trafilatura survivors are collected before final reranking. `FETCH_TOP_N` controls how many final ranked sources are sent forward. `FETCH_WORKERS` is the fetch/extraction thread count. Lower it to reduce CPU and network pressure during article fetching; raise it to fetch more pages in parallel. `OLLAMA_NUM_THREAD` is optional; leave it blank to let Ollama choose, or set it to tune CPU threads for Ollama calls, including Ollama-based summaries.
+
+`SEARCH_ENABLED` controls whether search starts enabled in new chat sessions. Default is `0` (OFF). You can still toggle at runtime with `/search-on` and `/search-off`.
 
 `SEARCH_META_ENRICH_ENABLED` toggles snippet enrichment from page metadata before the pre-fetch rank pass. `SEARCH_META_ENRICH_LIMIT` controls how many eligible text-mode results are enriched; set `0` for no cap.
 
@@ -231,7 +234,7 @@ Inside the chat, these slash commands are available:
 /?                 Show commands.
 /new               Clear chat context.
 /decider <prompt>  Run configured decider and query builder only; bypass rules, search, and LLM.
-/search-off        Disable search and send prompt directly to the LLM.
+/search-off        Disable search (new web fetch off). Keep answering with prior chat/search context.
 /search-on         Enable search and decider logic.
 /llm-off           Skip only the final assistant answer.
 /llm-on            Enable the final assistant answer.
@@ -243,6 +246,8 @@ exit, quit, q      Exit.
 ```
 
 In the web UI, slash commands work the same way and affect only that browser session.
+
+The web input helper text shows the current state as `Search is ON/OFF. Ask something or use /?` and updates when you run `/search-on` or `/search-off`.
 
 ## HTTP Server
 
@@ -325,6 +330,7 @@ Current behavior:
 10. A cross-encoder reranks surviving extracted articles using metadata plus extracted text.
 11. The top 5 articles are summarized by the configured summary provider, usually Ollama.
 12. The final Ollama model receives the user question and summarized current source material.
+13. Missing source links are appended deterministically from validated fetched URLs when `APPEND_SOURCE_LINKS=1`.
 
 Useful logs include:
 
