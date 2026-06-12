@@ -102,6 +102,11 @@ PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
 LLM_ENABLED = os.getenv("LLM_ENABLED", "1") == "1"
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "0") == "1"
 SEARCH_ONLY_TOP_N = read_positive_int_env("SEARCH_ONLY_TOP_N", "10")
+UNLOCK_PASSWORDS = tuple(
+    password.strip()
+    for password in os.getenv("PASSWORD", "").split(",")
+    if password.strip()
+)
 PROMPT_DEBUG_CONTEXT: ContextVar[bool] = ContextVar("PROMPT_DEBUG_CONTEXT", default=PROMPT_DEBUG)
 LLM_ENABLED_CONTEXT: ContextVar[bool] = ContextVar("LLM_ENABLED_CONTEXT", default=LLM_ENABLED)
 SEARCH_DECIDER = os.getenv("SEARCH_DECIDER", "python").strip().lower()
@@ -194,10 +199,42 @@ def llm_enabled() -> bool:
     return LLM_ENABLED_CONTEXT.get()
 
 
+def preserve_markdown_line_breaks(markup: str) -> str:
+    """Render model-authored line breaks as hard breaks in Rich Markdown."""
+    output_lines: list[str] = []
+    in_fence = False
+    fence_marker = ""
+
+    for line in markup.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            output_lines.append(line)
+            continue
+
+        if in_fence or not line.strip():
+            output_lines.append(line)
+            continue
+
+        right_stripped = line.rstrip()
+        if right_stripped.endswith(("  ", "\\")):
+            output_lines.append(line)
+        else:
+            output_lines.append(f"{right_stripped}  ")
+
+    return "\n".join(output_lines)
+
+
 def print_assistant_answer(answer: str, rich_output: bool = True) -> None:
     print("[Assistant]")
     if rich_output:
-        Console(file=sys.stdout).print(Markdown(answer))
+        Console(file=sys.stdout).print(Markdown(preserve_markdown_line_breaks(answer)))
     else:
         print(answer)
     print()
@@ -2014,6 +2051,7 @@ def print_commands() -> None:
     print("[Session Controls]")
     print("/focus-off         Web UI: stop following output while working.")
     print("/focus-on          Web UI: resume following output while working.")
+    print("/lock              Lock command processing.")
     print("/llm-off           Skip the final LLM answer.")
     print("/llm-on            Enable the final LLM answer.")
     print("/new               Clear chat context.")
@@ -2021,6 +2059,7 @@ def print_commands() -> None:
     print("/prompt-on         Show text sent to the answer/query LLM.")
     print("/search-off        Disable search; answer from prior context.")
     print("/search-on         Enable search and decider logic.")
+    print("/unlock <password> Unlock command processing.")
     print("exit, quit, q      Exit.")
     print()
 
@@ -2036,6 +2075,7 @@ class ChatSession:
         self.fetch_top_n = FETCH_TOP_N
         self.fetch_scan_limit = FETCH_SCAN_LIMIT
         self.fetch_max_chars = FETCH_MAX_CHARS
+        self.locked = bool(UNLOCK_PASSWORDS)
 
     def _set_context(self) -> tuple[Any, Any]:
         prompt_token = PROMPT_DEBUG_CONTEXT.set(self.prompt_debug)
@@ -2258,8 +2298,43 @@ class ChatSession:
     def handle_input(self, user_query: str) -> bool:
         if not user_query:
             return True
+        if self.locked:
+            if not UNLOCK_PASSWORDS:
+                print("[System] Locked, but no passwords are configured. Set PASSWORD in .env and restart.")
+                print()
+                return True
+            if user_query.lower().startswith("/unlock "):
+                password = user_query[len("/unlock "):].strip()
+                if not password:
+                    print("[System] Usage: /unlock <password>")
+                    print()
+                    return True
+                if password in UNLOCK_PASSWORDS:
+                    self.locked = False
+                    print("[System] Unlocked.")
+                    print()
+                    return True
+                print("[System] Invalid unlock password.")
+                print()
+                return True
+            if user_query.lower() == "/unlock":
+                print("[System] Usage: /unlock <password>")
+                print()
+                return True
+            print("[System] Locked. Use /unlock <password>.")
+            print()
+            return True
         if user_query == "/?":
             print_commands()
+            return True
+        if user_query.lower() == "/lock":
+            self.locked = True
+            print("[System] Locked. Use /unlock <password>.")
+            print()
+            return True
+        if user_query.lower().startswith("/unlock"):
+            print("[System] Already unlocked.")
+            print()
             return True
         if user_query.lower() == "/new":
             self.history.clear()
@@ -2506,5 +2581,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

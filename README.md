@@ -150,6 +150,7 @@ Search and fetch settings:
 
 ```env
 SEARCH_ENABLED=0
+PASSWORD=
 SEARCH_MODES=news,text
 SEARCH_NEWS_LIMIT=10
 SEARCH_TEXT_LIMIT=10
@@ -167,6 +168,8 @@ SOURCE_LINKS_MAX=5
 `SEARCH_NEWS_LIMIT` and `SEARCH_TEXT_LIMIT` control the initial DDGS search sample. `FETCH_SURVIVOR_N` controls how many post-Trafilatura survivors are collected before final reranking. `FETCH_TOP_N` controls how many final ranked sources are sent forward. `FETCH_WORKERS` is the fetch/extraction thread count. Lower it to reduce CPU and network pressure during article fetching; raise it to fetch more pages in parallel. `OLLAMA_NUM_THREAD` is optional; leave it blank to let Ollama choose, or set it to tune CPU threads for Ollama calls, including Ollama-based summaries.
 
 `SEARCH_ENABLED` controls whether search starts enabled in new chat sessions. Default is `0` (OFF). You can still toggle at runtime with `/search-on` and `/search-off`.
+
+`PASSWORD` is an optional comma-separated list of unlock passwords. When it is set, sessions start locked, and only `/unlock <password>` is accepted until a password matches. Leave it blank for no session lock.
 
 `SEARCH_META_ENRICH_ENABLED` toggles snippet enrichment from page metadata before the pre-fetch rank pass. `SEARCH_META_ENRICH_LIMIT` controls how many eligible text-mode results are enriched; set `0` for no cap.
 
@@ -251,6 +254,7 @@ Inside the chat, these slash commands are available:
 [Session Controls]
 /focus-off         Web UI: stop following output while working.
 /focus-on          Web UI: resume following output while working.
+/lock              Lock command processing.
 /llm-off           Skip the final LLM answer.
 /llm-on            Enable the final LLM answer.
 /new               Clear chat context.
@@ -258,10 +262,13 @@ Inside the chat, these slash commands are available:
 /prompt-on         Show text sent to the answer/query LLM.
 /search-off        Disable search; answer from prior context.
 /search-on         Enable search and decider logic.
+/unlock <password> Unlock command processing.
 exit, quit, q      Exit.
 ```
 
 In the web UI, slash commands work the same way and affect only that browser session.
+
+When `PASSWORD` is configured, sessions start locked. While locked, the system responds only to `/unlock <password>`.
 
 The web input helper text shows the current state as `Search is ON/OFF. Ask something or use /?` and updates when you run `/search-on` or `/search-off`.
 

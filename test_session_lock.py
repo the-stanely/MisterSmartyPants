@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+import websearchMCP
+
+
+def test_session_starts_unlocked_without_passwords(monkeypatch) -> None:
+    monkeypatch.setattr(websearchMCP, "UNLOCK_PASSWORDS", ())
+
+    session = websearchMCP.ChatSession(rich_output=False)
+
+    assert session.locked is False
+
+
+def test_session_unlocks_with_configured_password(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(websearchMCP, "UNLOCK_PASSWORDS", ("alpha", "beta"))
+    session = websearchMCP.ChatSession(rich_output=False)
+
+    assert session.locked is True
+    assert session.handle_input("/unlock beta") is True
+
+    output = capsys.readouterr().out
+    assert "[System] Unlocked." in output
+    assert session.locked is False
+
+
+def test_locked_session_rejects_regular_input(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(websearchMCP, "UNLOCK_PASSWORDS", ("alpha",))
+    session = websearchMCP.ChatSession(rich_output=False)
+
+    assert session.handle_input("hello") is True
+
+    output = capsys.readouterr().out
+    assert "[System] Locked. Use /unlock <password>." in output
+    assert session.locked is True
+
+
+def test_preserve_markdown_line_breaks_skips_code_fences() -> None:
+    source = "first line\nsecond line\n\n```text\ncode line\n```\nafter"
+
+    rendered = websearchMCP.preserve_markdown_line_breaks(source)
+
+    assert "first line  \nsecond line  " in rendered
+    assert "```text\ncode line\n```" in rendered
+    assert rendered.endswith("after  ")
