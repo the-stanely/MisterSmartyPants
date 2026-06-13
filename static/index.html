@@ -50,10 +50,10 @@
     const log = document.getElementById('log');
     const send = document.getElementById('send');
     let focusFollow = true;
-    let searchEnabled = false;
+    let searchMode = 'OFF';
 
     function updateMessagePlaceholder() {
-      message.placeholder = `Search is ${searchEnabled ? 'ON' : 'OFF'}. Ask something or use /?`;
+      message.placeholder = `Search is ${searchMode}. Ask something or use /?`;
     }
 
     updateMessagePlaceholder();
@@ -103,26 +103,31 @@
       event.preventDefault();
       const text = message.value.trim();
       if (!text) return;
+      const lowerText = text.toLowerCase();
       message.value = '';
-      if (text.toLowerCase() === '/focus-off') {
+      if (lowerText === '/focus-off') {
         focusFollow = false;
         appendSystem(text);
         message.focus();
         return;
       }
-      if (text.toLowerCase() === '/focus-on') {
+      if (lowerText === '/focus-on') {
         focusFollow = true;
         appendSystem(text);
         scrollToBottom(true);
         message.focus();
         return;
       }
-      if (text.toLowerCase() === '/search-on') {
-        searchEnabled = true;
+      if (lowerText === '/search-on') {
+        searchMode = 'ON';
         updateMessagePlaceholder();
       }
-      if (text.toLowerCase() === '/search-off') {
-        searchEnabled = false;
+      if (lowerText === '/search-off') {
+        searchMode = 'OFF';
+        updateMessagePlaceholder();
+      }
+      if (lowerText === '/search-force') {
+        searchMode = 'FORCED';
         updateMessagePlaceholder();
       }
       send.disabled = true;

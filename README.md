@@ -167,7 +167,7 @@ SOURCE_LINKS_MAX=5
 
 `SEARCH_NEWS_LIMIT` and `SEARCH_TEXT_LIMIT` control the initial DDGS search sample. `FETCH_SURVIVOR_N` controls how many post-Trafilatura survivors are collected before final reranking. `FETCH_TOP_N` controls how many final ranked sources are sent forward. `FETCH_WORKERS` is the fetch/extraction thread count. Lower it to reduce CPU and network pressure during article fetching; raise it to fetch more pages in parallel. `OLLAMA_NUM_THREAD` is optional; leave it blank to let Ollama choose, or set it to tune CPU threads for Ollama calls, including Ollama-based summaries.
 
-`SEARCH_ENABLED` controls whether search starts enabled in new chat sessions. Default is `0` (OFF). You can still toggle at runtime with `/search-on` and `/search-off`.
+`SEARCH_ENABLED` controls whether search starts enabled in new chat sessions. Default is `0` (OFF). You can still toggle at runtime with `/search-on`, `/search-off`, and `/search-force`.
 
 `PASSWORD` is an optional comma-separated list of unlock passwords. When it is set, sessions start locked, and only `/unlock <password>` is accepted until a password matches. Leave it blank for no session lock.
 
@@ -246,7 +246,6 @@ Inside the chat, these slash commands are available:
 /hn <query>        Run search only against Hacker News.
 /news <query>      Run search only for current news.
 /search <query>    Run search only; bypass decider, query builder, and answer LLM.
-/search-force <query> Force a full search-backed answer; bypass decider only.
 /stack <query>     Run search only against Stack Overflow/Exchange.
 /stocks <query>    Run search only for stock market news.
 /weather <query>   Run search only for weather results for a city/state.
@@ -261,6 +260,7 @@ Inside the chat, these slash commands are available:
 /new               Clear chat context.
 /prompt-off        Hide text sent to the answer/query LLM.
 /prompt-on         Show text sent to the answer/query LLM.
+/search-force      Enable forced full search answers; bypass decider.
 /search-off        Disable search; answer from prior context.
 /search-on         Enable search and decider logic.
 /unlock <password> Unlock command processing.
@@ -271,11 +271,11 @@ In the web UI, slash commands work the same way and affect only that browser ses
 
 When `PASSWORD` is configured, sessions start locked. While locked, the system responds only to `/unlock <password>`.
 
-The web input helper text shows the current state as `Search is ON/OFF. Ask something or use /?` and updates when you run `/search-on` or `/search-off`.
+The web input helper text shows the current state as `Search is ON/OFF/FORCED. Ask something or use /?` and updates when you run `/search-on`, `/search-off`, or `/search-force`.
 
 `/search <query>` is a strict search-engine mode: it bypasses the decider, query builder, and all LLM calls. It uses DDGS result metadata and fast meta-description enrichment (no full page extraction), ranks results with the metadata relevance ranker, and returns the top `SEARCH_ONLY_TOP_N` links with summaries.
 
-`/search-force <query>` forces the normal search-backed answer pipeline even when search is off or the decider would answer from memory. It skips only the search decider; query building, DDGS search, fetch/extraction, ranking, summarization, final answer generation, source-link appending, and history updates still run.
+`/search-force` switches the session into forced search mode. Subsequent normal prompts use the full search-backed answer pipeline and skip only the search decider; query building, DDGS search, fetch/extraction, ranking, summarization, final answer generation, source-link appending, and history updates still run. Use `/search-on` to return to decider-controlled search, or `/search-off` to answer from memory and prior context.
 
 `/arxiv <query>` and `/wiki <query>` are the same no-LLM mode, but with the search query biased to `arxiv.org` or `wikipedia.org/wiki` so the results stay domain-specific.
 

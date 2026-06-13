@@ -2043,7 +2043,6 @@ def print_commands() -> None:
     print("/hn <query>        Search only Hacker News. Returns clickable story links and summaries.")
     print("/news <query>      Search only current news. Returns clickable links and summaries.")
     print("/search <query>    Search only; bypass decider, query builder, and LLM. Returns clickable links.")
-    print("/search-force <query> Force full search answer; bypass decider only.")
     print("/stack <query>     Search only Stack Overflow/Exchange. Returns clickable post links and summaries.")
     print("/stocks <query>    Search only stock market news. Returns clickable links and summaries.")
     print("/weather <query>   Search only weather for a city/state. Returns clickable links and summaries.")
@@ -2058,6 +2057,7 @@ def print_commands() -> None:
     print("/new               Clear chat context.")
     print("/prompt-off        Hide text sent to the answer/query LLM.")
     print("/prompt-on         Show text sent to the answer/query LLM.")
+    print("/search-force      Enable forced full search answers; bypass decider.")
     print("/search-off        Disable search; answer from prior context.")
     print("/search-on         Enable search and decider logic.")
     print("/unlock <password> Unlock command processing.")
@@ -2072,6 +2072,7 @@ class ChatSession:
         self.prompt_debug = PROMPT_DEBUG
         self.llm_enabled = LLM_ENABLED
         self.search_enabled = SEARCH_ENABLED
+        self.search_forced = False
         self.search_limit = SEARCH_LIMIT
         self.fetch_top_n = FETCH_TOP_N
         self.fetch_scan_limit = FETCH_SCAN_LIMIT
@@ -2088,10 +2089,10 @@ class ChatSession:
         PROMPT_DEBUG_CONTEXT.reset(prompt_token)
         LLM_ENABLED_CONTEXT.reset(llm_token)
 
-    def run_query(self, query: str, force_search: bool = False) -> None:
+    def run_query(self, query: str) -> None:
         tokens = self._set_context()
         try:
-            self._run_query(query, force_search=force_search)
+            self._run_query(query)
         finally:
             self._reset_context(tokens)
 
@@ -2164,8 +2165,8 @@ class ChatSession:
         finally:
             self._reset_context(tokens)
 
-    def _run_query(self, query: str, force_search: bool = False) -> None:
-        if not self.search_enabled and not force_search:
+    def _run_query(self, query: str) -> None:
+        if not self.search_enabled and not self.search_forced:
             llm_start = time.perf_counter()
             if not llm_enabled():
                 llm_ms = (time.perf_counter() - llm_start) * 1000
@@ -2190,11 +2191,11 @@ class ChatSession:
             self.history.append({"role": "assistant", "content": answer})
             return
 
-        if force_search:
+        if self.search_forced:
             global _last_qwen_scores
             _last_qwen_scores = None
             should_search = True
-            print("[Search decider skipped; forced by /search-force]")
+            print("[Search decider skipped; forced search mode]")
         else:
             marker = forced_search_marker(query)
             will_run_decider = SEARCH_DECIDER in {"python", "ollama"} and marker is None
@@ -2370,24 +2371,20 @@ class ChatSession:
             return True
         if user_query.lower() == "/search-off":
             self.search_enabled = False
+            self.search_forced = False
             print("[System] Search disabled. Prompts will be sent directly to the LLM.")
             print()
             return True
         if user_query.lower() == "/search-on":
             self.search_enabled = True
+            self.search_forced = False
             print("[System] Search enabled.")
             print()
             return True
-        if user_query.lower().startswith("/search-force "):
-            forced_query = user_query[len("/search-force "):].strip()
-            if not forced_query:
-                print("[System] Usage: /search-force <query>")
-                print()
-                return True
-            self.run_query(forced_query, force_search=True)
-            return True
         if user_query.lower() == "/search-force":
-            print("[System] Usage: /search-force <query>")
+            self.search_enabled = True
+            self.search_forced = True
+            print("[System] Search forced. Search decider will be bypassed.")
             print()
             return True
         if user_query.lower().startswith("/search "):
