@@ -2043,6 +2043,7 @@ def print_commands() -> None:
     print("/hn <query>        Search only Hacker News. Returns clickable story links and summaries.")
     print("/news <query>      Search only current news. Returns clickable links and summaries.")
     print("/search <query>    Search only; bypass decider, query builder, and LLM. Returns clickable links.")
+    print("/search-force <query> Force full search answer; bypass decider only.")
     print("/stack <query>     Search only Stack Overflow/Exchange. Returns clickable post links and summaries.")
     print("/stocks <query>    Search only stock market news. Returns clickable links and summaries.")
     print("/weather <query>   Search only weather for a city/state. Returns clickable links and summaries.")
@@ -2087,10 +2088,10 @@ class ChatSession:
         PROMPT_DEBUG_CONTEXT.reset(prompt_token)
         LLM_ENABLED_CONTEXT.reset(llm_token)
 
-    def run_query(self, query: str) -> None:
+    def run_query(self, query: str, force_search: bool = False) -> None:
         tokens = self._set_context()
         try:
-            self._run_query(query)
+            self._run_query(query, force_search=force_search)
         finally:
             self._reset_context(tokens)
 
@@ -2163,8 +2164,8 @@ class ChatSession:
         finally:
             self._reset_context(tokens)
 
-    def _run_query(self, query: str) -> None:
-        if not self.search_enabled:
+    def _run_query(self, query: str, force_search: bool = False) -> None:
+        if not self.search_enabled and not force_search:
             llm_start = time.perf_counter()
             if not llm_enabled():
                 llm_ms = (time.perf_counter() - llm_start) * 1000
@@ -2189,15 +2190,21 @@ class ChatSession:
             self.history.append({"role": "assistant", "content": answer})
             return
 
-        marker = forced_search_marker(query)
-        will_run_decider = SEARCH_DECIDER in {"python", "ollama"} and marker is None
-        decider_start = time.perf_counter()
-        should_search, decision_reason, search_query = decide_search_action(query, self.history)
-        decider_ms = (time.perf_counter() - decider_start) * 1000
-        if will_run_decider:
-            print(format_decider_elapsed(decider_ms, "SEARCH" if should_search else "ANSWER"))
-        elif marker:
-            print(f"[Search decider skipped; forced search marker = {marker}]")
+        if force_search:
+            global _last_qwen_scores
+            _last_qwen_scores = None
+            should_search = True
+            print("[Search decider skipped; forced by /search-force]")
+        else:
+            marker = forced_search_marker(query)
+            will_run_decider = SEARCH_DECIDER in {"python", "ollama"} and marker is None
+            decider_start = time.perf_counter()
+            should_search, decision_reason, search_query = decide_search_action(query, self.history)
+            decider_ms = (time.perf_counter() - decider_start) * 1000
+            if will_run_decider:
+                print(format_decider_elapsed(decider_ms, "SEARCH" if should_search else "ANSWER"))
+            elif marker:
+                print(f"[Search decider skipped; forced search marker = {marker}]")
 
         if not should_search:
             llm_start = time.perf_counter()
@@ -2369,6 +2376,18 @@ class ChatSession:
         if user_query.lower() == "/search-on":
             self.search_enabled = True
             print("[System] Search enabled.")
+            print()
+            return True
+        if user_query.lower().startswith("/search-force "):
+            forced_query = user_query[len("/search-force "):].strip()
+            if not forced_query:
+                print("[System] Usage: /search-force <query>")
+                print()
+                return True
+            self.run_query(forced_query, force_search=True)
+            return True
+        if user_query.lower() == "/search-force":
+            print("[System] Usage: /search-force <query>")
             print()
             return True
         if user_query.lower().startswith("/search "):

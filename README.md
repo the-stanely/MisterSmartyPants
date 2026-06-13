@@ -246,6 +246,7 @@ Inside the chat, these slash commands are available:
 /hn <query>        Run search only against Hacker News.
 /news <query>      Run search only for current news.
 /search <query>    Run search only; bypass decider, query builder, and answer LLM.
+/search-force <query> Force a full search-backed answer; bypass decider only.
 /stack <query>     Run search only against Stack Overflow/Exchange.
 /stocks <query>    Run search only for stock market news.
 /weather <query>   Run search only for weather results for a city/state.
@@ -273,6 +274,8 @@ When `PASSWORD` is configured, sessions start locked. While locked, the system r
 The web input helper text shows the current state as `Search is ON/OFF. Ask something or use /?` and updates when you run `/search-on` or `/search-off`.
 
 `/search <query>` is a strict search-engine mode: it bypasses the decider, query builder, and all LLM calls. It uses DDGS result metadata and fast meta-description enrichment (no full page extraction), ranks results with the metadata relevance ranker, and returns the top `SEARCH_ONLY_TOP_N` links with summaries.
+
+`/search-force <query>` forces the normal search-backed answer pipeline even when search is off or the decider would answer from memory. It skips only the search decider; query building, DDGS search, fetch/extraction, ranking, summarization, final answer generation, source-link appending, and history updates still run.
 
 `/arxiv <query>` and `/wiki <query>` are the same no-LLM mode, but with the search query biased to `arxiv.org` or `wikipedia.org/wiki` so the results stay domain-specific.
 
