@@ -258,11 +258,67 @@ def fetched_page_quality(page_obj: dict[str, Any]) -> tuple[bool, str]:
         "enable javascript",
         "access denied",
         "captcha",
+        "are you a robot",
+        "checking your browser",
+        "checking if the site connection is secure",
+        "cloudflare ray id",
+        "cf-footer-ip",
+        "footer-ip-reveal",
+        "ddos protection by cloudflare",
+        "verify you are human",
+        "unusual traffic",
+        "temporarily blocked",
+        "request blocked",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "please enable cookies",
+        "please enable javascript",
+        "sign in to continue",
+        "subscribe to continue",
     ]
     for marker in bad_markers:
         if marker in low:
             return False, f"boilerplate marker: {marker}"
     return True, "ok"
+
+
+def fetched_html_error_reason(html: str) -> str | None:
+    """Detect HTML error/interstitial pages that often return HTTP 200."""
+    if not html:
+        return "empty HTML response"
+    low = html[:200000].lower()
+    checks = [
+        ("Cloudflare error page", ("cf-error-code", "cloudflare ray id")),
+        ("Cloudflare footer", ("cf-footer-ip", "footer-ip-reveal")),
+        ("Cloudflare challenge", ("checking if the site connection is secure", "cloudflare")),
+        ("bot challenge page", ("verify you are human", "captcha")),
+        ("bot challenge page", ("are you a robot", "captcha")),
+        ("Google unusual traffic page", ("our systems have detected unusual traffic",)),
+        ("access denied page", ("access denied", "request blocked")),
+        ("JavaScript gate", ("enable javascript", "please enable javascript")),
+        ("cookie gate", ("enable cookies", "please enable cookies")),
+        ("server error page", ("502 bad gateway",)),
+        ("server error page", ("503 service unavailable",)),
+        ("server error page", ("504 gateway timeout",)),
+    ]
+    for reason, markers in checks:
+        if all(marker in low for marker in markers):
+            return reason
+    title = title_from_html(html, "")
+    title_low = title.lower()
+    title_markers = {
+        "access denied": "access denied page",
+        "attention required!": "Cloudflare challenge",
+        "just a moment...": "Cloudflare challenge",
+        "service unavailable": "server error page",
+        "bad gateway": "server error page",
+        "gateway timeout": "server error page",
+    }
+    for marker, reason in title_markers.items():
+        if marker in title_low:
+            return reason
+    return None
 
 
 def compact_text(text: str, max_chars: int) -> str:
@@ -864,6 +920,9 @@ def fetch_url_content(url: str, max_chars: int) -> dict[str, str]:
             }
         if "text/html" not in ctype and "application/xhtml+xml" not in ctype:
             return {"url": url, "title": url, "content": f"Fetch error: Unsupported content-type {ctype or 'unknown'}"}
+        html_error = fetched_html_error_reason(resp.text)
+        if html_error:
+            return {"url": resp.url or url, "title": title_from_html(resp.text, resp.url or url), "content": f"Fetch error: {html_error}"}
 
         return extract_article_content(resp.text, resp.url or url, max_chars)
     except Exception as exc:

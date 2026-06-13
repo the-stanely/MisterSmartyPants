@@ -69,3 +69,35 @@ def test_search_on_and_off_clear_forced_mode(monkeypatch) -> None:
     assert session.handle_input("/search-off") is True
     assert session.search_enabled is False
     assert session.search_forced is False
+
+
+def test_fetched_html_error_reason_detects_cloudflare_footer() -> None:
+    html = """
+    <html><head><title>Attention Required! | Cloudflare</title></head>
+    <body>
+      <script>footer-ip-reveal");document.getElementById("cf-footer-ip")</script>
+      Cloudflare Ray ID: abc123
+    </body></html>
+    """
+
+    assert websearchMCP.fetched_html_error_reason(html) == "Cloudflare footer"
+
+
+def test_fetched_html_error_reason_detects_common_server_errors() -> None:
+    html = "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
+
+    assert websearchMCP.fetched_html_error_reason(html) == "server error page"
+
+
+def test_fetched_page_quality_rejects_extracted_challenge_text() -> None:
+    page = {
+        "content": (
+            "Checking if the site connection is secure. Cloudflare Ray ID abc123. "
+            "Please enable JavaScript and cookies to continue. " * 8
+        )
+    }
+
+    ok, reason = websearchMCP.fetched_page_quality(page)
+
+    assert ok is False
+    assert "boilerplate marker" in reason
