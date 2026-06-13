@@ -19,10 +19,11 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 
 sessions: dict[str, ChatSession] = {}
+session_locks: dict[str, threading.Lock] = {}
 sessions_lock = threading.Lock()
 jobs: dict[str, dict[str, object]] = {}
 jobs_lock = threading.Lock()
-chat_lock = threading.Lock()
+preload_lock = threading.Lock()
 not_found_lock = threading.Lock()
 not_found_streaks: dict[str, int] = {}
 blocked_until: dict[str, float] = {}
@@ -32,7 +33,7 @@ NOT_FOUND_BLOCK_SECONDS = 10 * 60
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    with chat_lock:
+    with preload_lock:
         preload_models()
     yield
 
@@ -94,7 +95,7 @@ async def block_repeated_not_found(request: Request, call_next):
             server_log(f"REQUEST ip={ip} method={request.method} path={request.url.path} status={status_code}")
     return response
 
-def get_session(session_id: str | None, response: Response) -> tuple[str, ChatSession]:
+def get_session(session_id: str | None, response: Response) -> tuple[str, ChatSession, threading.Lock]:
     if not session_id:
         session_id = uuid4().hex
         response.set_cookie("msp_session", session_id, httponly=True, samesite="lax")
@@ -103,7 +104,9 @@ def get_session(session_id: str | None, response: Response) -> tuple[str, ChatSe
         if session is None:
             session = ChatSession(rich_output=False)
             sessions[session_id] = session
-    return session_id, session
+            session_locks[session_id] = threading.Lock()
+        session_lock = session_locks.setdefault(session_id, threading.Lock())
+    return session_id, session, session_lock
 
 
 @app.get("/")
@@ -136,8 +139,9 @@ def health() -> dict[str, str]:
 
 @app.post("/api/new")
 def new_chat(response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, str]:
-    _, session = get_session(msp_session, response)
-    session.history.clear()
+    _, session, session_lock = get_session(msp_session, response)
+    with session_lock:
+        session.history.clear()
     return {"status": "cleared"}
 
 
@@ -170,10 +174,10 @@ class LiveJobBuffer(io.TextIOBase):
         with self.lock:
             return "".join(self.parts)
 
-def run_chat_job(job_id: str, session: ChatSession, message: str) -> None:
+def run_chat_job(job_id: str, session: ChatSession, session_lock: threading.Lock, message: str) -> None:
     buffer = LiveJobBuffer(job_id)
     error: str | None = None
-    with chat_lock:
+    with session_lock:
         try:
             with redirect_stdout(buffer), redirect_stderr(buffer):
                 session.handle_input(message)
@@ -197,12 +201,12 @@ def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(
     if not message:
         return {"done": True, "output": ""}
 
-    session_id, session = get_session(msp_session, response)
+    session_id, session, session_lock = get_session(msp_session, response)
     job_id = uuid4().hex
     with jobs_lock:
         jobs[job_id] = {"session_id": session_id, "done": False, "output": "", "error": None}
 
-    thread = threading.Thread(target=run_chat_job, args=(job_id, session, message), daemon=True)
+    thread = threading.Thread(target=run_chat_job, args=(job_id, session, session_lock, message), daemon=True)
     thread.start()
     return {"job_id": job_id, "done": False}
 
