@@ -50,6 +50,26 @@ OLLAMA_TOP_P = float(os.getenv("OLLAMA_TOP_P", "0.9"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
 OLLAMA_NUM_THREAD_RAW = os.getenv("OLLAMA_NUM_THREAD", "").strip()
 OLLAMA_NUM_THREAD = int(OLLAMA_NUM_THREAD_RAW) if OLLAMA_NUM_THREAD_RAW else None
+USE_OPENROUTER = os.getenv("USE_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_API = os.getenv("OPENROUTER_API", "https://openrouter.ai/api/v1/chat/completions")
+OPENROUTER_MODEL_CHAIN = tuple(
+    model.strip()
+    for model in os.getenv("OPENROUTER_MODEL_CHAIN", "").split(",")
+    if model.strip()
+)
+OR_DECIDER_MODEL = tuple(
+    model.strip()
+    for model in os.getenv("OR_DECIDER_MODEL", "").split(",")
+    if model.strip()
+)
+OR_SUMMARY_MODEL = tuple(
+    model.strip()
+    for model in os.getenv("OR_SUMMARY_MODEL", "").split(",")
+    if model.strip()
+)
+OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+OPENROUTER_X_TITLE = os.getenv("OPENROUTER_X_TITLE", "MisterSmartyPants").strip()
 QUESTION = os.getenv("QUESTION", "Wall street biggest movers.")
 SEARCH_LIMIT = 12
 SEARCH_NEWS_LIMIT = read_positive_int_env("SEARCH_NEWS_LIMIT", "10")
@@ -100,7 +120,7 @@ DEBUG = False
 
 PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
 LLM_ENABLED = os.getenv("LLM_ENABLED", "1") == "1"
-SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "0") == "1"
+SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1") == "1"
 SEARCH_ONLY_TOP_N = read_positive_int_env("SEARCH_ONLY_TOP_N", "10")
 UNLOCK_PASSWORDS = tuple(
     password.strip()
@@ -109,6 +129,10 @@ UNLOCK_PASSWORDS = tuple(
 )
 PROMPT_DEBUG_CONTEXT: ContextVar[bool] = ContextVar("PROMPT_DEBUG_CONTEXT", default=PROMPT_DEBUG)
 LLM_ENABLED_CONTEXT: ContextVar[bool] = ContextVar("LLM_ENABLED_CONTEXT", default=LLM_ENABLED)
+LLM_MODEL_CONTEXT: ContextVar[str] = ContextVar(
+    "LLM_MODEL_CONTEXT",
+    default=OPENROUTER_MODEL_CHAIN[0] if USE_OPENROUTER and OPENROUTER_MODEL_CHAIN else OLLAMA_MODEL,
+)
 SEARCH_DECIDER = os.getenv("SEARCH_DECIDER", "python").strip().lower()
 DECIDER_MODEL = os.getenv(
     "DECIDER_MODEL",
@@ -197,6 +221,37 @@ def prompt_debug_enabled() -> bool:
 
 def llm_enabled() -> bool:
     return LLM_ENABLED_CONTEXT.get()
+
+
+def llm_model_label() -> str:
+    return LLM_MODEL_CONTEXT.get()
+
+
+def reload_openrouter_config() -> tuple[bool, tuple[str, ...], bool]:
+    """Reload OpenRouter settings from .env without exposing the API key."""
+    global USE_OPENROUTER, OPENROUTER_API_KEY, OPENROUTER_API, OPENROUTER_MODEL_CHAIN, OR_DECIDER_MODEL, OR_SUMMARY_MODEL
+    global OPENROUTER_HTTP_REFERER, OPENROUTER_X_TITLE
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=True)
+    except Exception as exc:
+        raise RuntimeError(f"Unable to reload .env: {exc}") from exc
+
+    USE_OPENROUTER = os.getenv("USE_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+    OPENROUTER_API = os.getenv("OPENROUTER_API", "https://openrouter.ai/api/v1/chat/completions")
+    OPENROUTER_MODEL_CHAIN = tuple(
+        model.strip()
+        for model in os.getenv("OPENROUTER_MODEL_CHAIN", "").split(",")
+        if model.strip()
+    )
+    OR_DECIDER_MODEL = tuple(model.strip() for model in os.getenv("OR_DECIDER_MODEL", "").split(",") if model.strip())
+    OR_SUMMARY_MODEL = tuple(model.strip() for model in os.getenv("OR_SUMMARY_MODEL", "").split(",") if model.strip())
+    OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+    OPENROUTER_X_TITLE = os.getenv("OPENROUTER_X_TITLE", "MisterSmartyPants").strip()
+    return USE_OPENROUTER, OPENROUTER_MODEL_CHAIN, bool(OPENROUTER_API_KEY)
 
 
 def preserve_markdown_line_breaks(markup: str) -> str:
@@ -1365,10 +1420,21 @@ def print_prompt_debug(messages: list[dict[str, str]], serialized: str, model: s
     print()
 
 
-def chat_once(messages: list[dict[str, str]], model: str = OLLAMA_MODEL, num_predict: int | None = None) -> str:
+def chat_once(
+    messages: list[dict[str, str]],
+    model: str = OLLAMA_MODEL,
+    num_predict: int | None = None,
+    openrouter_model_chain: tuple[str, ...] | None = None,
+) -> str:
     serialized_messages = validate_llm_messages(messages)
+    selected_openrouter_chain = openrouter_model_chain or OPENROUTER_MODEL_CHAIN
     if prompt_debug_enabled():
-        print_prompt_debug(messages, serialized_messages, model)
+        prompt_model = selected_openrouter_chain[0] if USE_OPENROUTER and selected_openrouter_chain else model
+        print_prompt_debug(messages, serialized_messages, prompt_model)
+
+    if USE_OPENROUTER:
+        return chat_once_openrouter(messages, num_predict=num_predict, model_chain=selected_openrouter_chain)
+
     options = {
         "num_ctx": OLLAMA_NUM_CTX,
         "temperature": OLLAMA_TEMPERATURE,
@@ -1384,10 +1450,64 @@ def chat_once(messages: list[dict[str, str]], model: str = OLLAMA_MODEL, num_pre
         "stream": False,
         "options": options,
     }
+    LLM_MODEL_CONTEXT.set(model)
     response = requests.post(OLLAMA_API, json=payload, timeout=OLLAMA_TIMEOUT_SECONDS)
     response.raise_for_status()
     obj = response.json()
     return ((obj.get("message") or {}).get("content") or "").strip()
+
+
+def chat_once_openrouter(
+    messages: list[dict[str, str]],
+    num_predict: int | None = None,
+    model_chain: tuple[str, ...] | None = None,
+) -> str:
+    """Call OpenRouter and retry each configured model in order."""
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("USE_OPENROUTER is enabled but OPENROUTER_API_KEY is missing.")
+    selected_model_chain = model_chain or OPENROUTER_MODEL_CHAIN
+    if not selected_model_chain:
+        raise RuntimeError("USE_OPENROUTER is enabled but OPENROUTER_MODEL_CHAIN is empty.")
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if OPENROUTER_HTTP_REFERER:
+        headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+    if OPENROUTER_X_TITLE:
+        headers["X-Title"] = OPENROUTER_X_TITLE
+
+    last_error: Exception | None = None
+    for attempt, openrouter_model in enumerate(selected_model_chain, start=1):
+        LLM_MODEL_CONTEXT.set(openrouter_model)
+        payload = {
+            "model": openrouter_model,
+            "messages": messages,
+            "temperature": OLLAMA_TEMPERATURE,
+            "top_p": OLLAMA_TOP_P,
+            "max_tokens": num_predict if num_predict is not None else OLLAMA_NUM_PREDICT,
+        }
+        try:
+            response = requests.post(
+                OPENROUTER_API,
+                headers=headers,
+                json=payload,
+                timeout=OLLAMA_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            content = ((response.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            content = content.strip()
+            if not content:
+                raise RuntimeError("OpenRouter returned an empty response.")
+            return content
+        except (requests.RequestException, ValueError, RuntimeError, TypeError, AttributeError) as exc:
+            last_error = exc
+            print(f"[OpenRouter attempt {attempt}/{len(selected_model_chain)} failed: {openrouter_model}: {exc}]")
+
+    raise RuntimeError(
+        f"All OpenRouter models failed after {len(selected_model_chain)} attempts."
+    ) from last_error
 
 
 def expand_prompt_placeholders(prompt: str, **values: str) -> str:
@@ -1531,6 +1651,7 @@ def summarize_with_ollama(excerpt_text: str, user_question: str) -> str:
         [{"role": "user", "content": summary_prompt_for_excerpt(excerpt_text, user_question)}],
         model=SUMMARY_MODEL,
         num_predict=DECIDER_SUMMARY_MAX_TOKENS,
+        openrouter_model_chain=OR_SUMMARY_MODEL,
     )
     return normalize_summary_text(generated)
 
@@ -1811,7 +1932,7 @@ def derive_search_query(user_prompt: str) -> str:
         }
     ]
     messages.append({"role": "user", "content": user_prompt})
-    content = chat_once(messages, model=DECIDER_MODEL, num_predict=64)
+    content = chat_once(messages, model=DECIDER_MODEL, num_predict=64, openrouter_model_chain=OR_DECIDER_MODEL)
     validated = validate_search_query(content)
     restored = restore_user_quotes(user_prompt, validated)
     if prompt_debug_enabled():
@@ -1839,6 +1960,7 @@ def decide_search_needed(user_prompt: str, history: list[dict[str, str]]) -> tup
         messages,
         model=DECIDER_MODEL,
         num_predict=64,
+        openrouter_model_chain=OR_DECIDER_MODEL,
     ).strip()
     label_match = re.search(r"\b(YES|NO)\b", content, flags=re.I)
     if not label_match:
@@ -2114,12 +2236,15 @@ def print_commands() -> None:
     print("/llm-off           Skip the final LLM answer.")
     print("/llm-on            Enable the final LLM answer.")
     print("/new               Clear chat context.")
+    print("/llm-reload        Reload OpenRouter settings from .env.")
     print("/prompt-off        Hide text sent to the answer/query LLM.")
     print("/prompt-on         Show text sent to the answer/query LLM.")
     print("/search-force      Enable forced full search answers; bypass decider.")
     print("/search-off        Disable search; answer from prior context.")
     print("/search-on         Enable search and decider logic.")
     print("/unlock <password> Unlock command processing.")
+    print("/verbose-off       Web UI: show final answers only.")
+    print("/verbose-on        Web UI: show pipeline details.")
     print("exit, quit, q      Exit.")
     print()
 
@@ -2132,6 +2257,7 @@ class ChatSession:
         self.llm_enabled = LLM_ENABLED
         self.search_enabled = SEARCH_ENABLED
         self.search_forced = False
+        self.verbose_output = False
         self.search_limit = SEARCH_LIMIT
         self.fetch_top_n = FETCH_TOP_N
         self.fetch_scan_limit = FETCH_SCAN_LIMIT
@@ -2229,7 +2355,7 @@ class ChatSession:
             llm_start = time.perf_counter()
             if not llm_enabled():
                 llm_ms = (time.perf_counter() - llm_start) * 1000
-                print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
+                print(f"[LLM: {llm_ms:.0f} ms, {llm_model_label()}]")
                 print("[LLM: skipped]")
                 print()
                 return
@@ -2237,14 +2363,13 @@ class ChatSession:
                 answer = answer_from_memory(query, self.history)
             except Exception as exc:
                 llm_ms = (time.perf_counter() - llm_start) * 1000
-                print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
+                print(f"[LLM: {llm_ms:.0f} ms, {llm_model_label()}]")
                 print("[Assistant]")
                 print(f"LLM answer failed: {exc}")
                 print()
                 return
             llm_ms = (time.perf_counter() - llm_start) * 1000
-            answer = append_missing_source_links(answer, source_links_from_history(self.history))
-            print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
+            print(f"[LLM: {llm_ms:.0f} ms, {llm_model_label()}]")
             print_assistant_answer(answer, self.rich_output)
             self.history.append({"role": "user", "content": query})
             self.history.append({"role": "assistant", "content": answer})
@@ -2270,7 +2395,7 @@ class ChatSession:
             llm_start = time.perf_counter()
             if not llm_enabled():
                 llm_ms = (time.perf_counter() - llm_start) * 1000
-                print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
+                print(f"[LLM: {llm_ms:.0f} ms, {llm_model_label()}]")
                 print("[LLM: skipped]")
                 print()
                 return
@@ -2278,14 +2403,13 @@ class ChatSession:
                 answer = answer_from_memory(query, self.history)
             except Exception as exc:
                 llm_ms = (time.perf_counter() - llm_start) * 1000
-                print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
+                print(f"[LLM: {llm_ms:.0f} ms, {llm_model_label()}]")
                 print("[Assistant]")
                 print(f"LLM answer failed: {exc}")
                 print()
                 return
             llm_ms = (time.perf_counter() - llm_start) * 1000
-            answer = append_missing_source_links(answer, source_links_from_history(self.history))
-            print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
+            print(f"[LLM: {llm_ms:.0f} ms, {llm_model_label()}]")
             print_assistant_answer(answer, self.rich_output)
             self.history.append({"role": "user", "content": query})
             self.history.append({"role": "assistant", "content": answer})
@@ -2339,7 +2463,7 @@ class ChatSession:
         llm_start = time.perf_counter()
         if not llm_enabled():
             llm_ms = (time.perf_counter() - llm_start) * 1000
-            print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
+            print(f"[LLM: {llm_ms:.0f} ms, {llm_model_label()}]")
             print("[LLM: skipped]")
             print()
             return
@@ -2347,7 +2471,7 @@ class ChatSession:
             answer = answer_from_results(query, result, self.history)
         except Exception as exc:
             llm_ms = (time.perf_counter() - llm_start) * 1000
-            print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
+            print(f"[LLM: {llm_ms:.0f} ms, {llm_model_label()}]")
             print("[Assistant]")
             print(f"LLM answer failed: {exc}")
             print()
@@ -2355,7 +2479,7 @@ class ChatSession:
 
         llm_ms = (time.perf_counter() - llm_start) * 1000
         answer = append_missing_source_links(answer, source_links_from_search_json(result))
-        print(f"[LLM: {llm_ms:.0f} ms, {OLLAMA_MODEL}]")
+        print(f"[LLM: {llm_ms:.0f} ms, {llm_model_label()}]")
         print_assistant_answer(answer, self.rich_output)
         prior_search_context = search_context_for_history(result)
         self.history.append({"role": "user", "content": query})
@@ -2378,6 +2502,8 @@ class ChatSession:
                     return True
                 if password in UNLOCK_PASSWORDS:
                     self.locked = False
+                    self.search_enabled = True
+                    self.search_forced = False
                     print("[System] Unlocked.")
                     print()
                     return True
@@ -2408,9 +2534,34 @@ class ChatSession:
             print("[System] Context cleared.")
             print()
             return True
+        if user_query.lower() == "/llm-reload":
+            try:
+                enabled, model_chain, has_api_key = reload_openrouter_config()
+            except RuntimeError as exc:
+                print(f"[System] OpenRouter configuration reload failed: {exc}")
+                print()
+                return True
+            print(
+                "[System] OpenRouter configuration reloaded: "
+                f"enabled={'true' if enabled else 'false'}, "
+                f"API key={'present' if has_api_key else 'missing'}, "
+                f"model chain ({len(model_chain)}): {', '.join(model_chain) or 'empty'}"
+            )
+            print()
+            return True
         if user_query.lower() == "/prompt-on":
             self.prompt_debug = True
             print("[System] Prompt display enabled.")
+            print()
+            return True
+        if user_query.lower() == "/verbose-on":
+            self.verbose_output = True
+            print("[System] Verbose output enabled.")
+            print()
+            return True
+        if user_query.lower() == "/verbose-off":
+            self.verbose_output = False
+            print("[System] Verbose output disabled.")
             print()
             return True
         if user_query.lower() == "/prompt-off":

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import io
+import base64
+import json
+import os
 import sys
 import threading
 import time
@@ -9,14 +12,25 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import Cookie, FastAPI, Request, Response, status
+from fastapi import Cookie, FastAPI, HTTPException, Request, Response, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from fido2.server import Fido2Server
+from fido2.webauthn import (
+    AttestedCredentialData,
+    AuthenticatorAttachment,
+    PublicKeyCredentialRpEntity,
+    PublicKeyCredentialUserEntity,
+    UserVerificationRequirement,
+)
 
 from websearchMCP import ChatSession, preload_models
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+PASSKEYS_FILE = BASE_DIR / "passkeys.json"
+PASSKEY_CHALLENGE_SECONDS = 5 * 60
 
 sessions: dict[str, ChatSession] = {}
 session_locks: dict[str, threading.Lock] = {}
@@ -43,6 +57,10 @@ app = FastAPI(title="MisterSmartyPants", lifespan=lifespan)
 
 class ChatRequest(BaseModel):
     message: str
+
+
+class PasskeyResponse(BaseModel):
+    credential: dict[str, object]
 
 
 
@@ -109,6 +127,56 @@ def get_session(session_id: str | None, response: Response) -> tuple[str, ChatSe
     return session_id, session, session_lock
 
 
+def base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def base64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def passkey_rp_id(request: Request) -> str:
+    configured = os.getenv("PASSKEY_RP_ID", "").strip().lower()
+    if configured:
+        return configured
+    return request.url.hostname or "localhost"
+
+
+def passkey_server(request: Request) -> Fido2Server:
+    rp_id = passkey_rp_id(request)
+    return Fido2Server(PublicKeyCredentialRpEntity(id=rp_id, name="MisterSmartyPants"))
+
+
+def load_passkeys(rp_id: str) -> list[AttestedCredentialData]:
+    if not PASSKEYS_FILE.exists():
+        return []
+    try:
+        records = json.loads(PASSKEYS_FILE.read_text(encoding="utf-8"))
+        credentials = []
+        for record in records:
+            if record.get("rp_id") != rp_id:
+                continue
+            credential, remaining = AttestedCredentialData.unpack_from(base64url_decode(record["credential"]))
+            if remaining:
+                raise ValueError("Passkey credential has trailing data.")
+            credentials.append(credential)
+        return credentials
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Cannot read passkey store: {exc}") from exc
+
+
+def save_passkey(rp_id: str, credential: AttestedCredentialData) -> None:
+    records: list[dict[str, str]] = []
+    if PASSKEYS_FILE.exists():
+        records = json.loads(PASSKEYS_FILE.read_text(encoding="utf-8"))
+    encoded = base64url_encode(bytes(credential))
+    if not any(record.get("credential") == encoded for record in records):
+        records.append({"rp_id": rp_id, "credential": encoded})
+        temporary = PASSKEYS_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(PASSKEYS_FILE)
+
+
 @app.get("/")
 def index() -> FileResponse:
     response = FileResponse(STATIC_DIR / "index.html")
@@ -137,6 +205,88 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def set_passkey_challenge(session: ChatSession, kind: str, state: object) -> None:
+    challenges = getattr(session, "passkey_challenges", {})
+    challenges[kind] = (time.monotonic() + PASSKEY_CHALLENGE_SECONDS, state)
+    session.passkey_challenges = challenges
+
+
+def take_passkey_challenge(session: ChatSession, kind: str) -> object:
+    challenge = getattr(session, "passkey_challenges", {}).pop(kind, None)
+    if challenge is None or challenge[0] < time.monotonic():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Passkey request expired. Try again.")
+    return challenge[1]
+
+
+@app.post("/api/passkey/register/options")
+def passkey_register_options(request: Request, response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, object]:
+    _, session, session_lock = get_session(msp_session, response)
+    with session_lock:
+        if session.locked:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unlock with your password before adding a passkey.")
+        rp_id = passkey_rp_id(request)
+        options, state = passkey_server(request).register_begin(
+            PublicKeyCredentialUserEntity(id=b"mistersmartypants", name="MisterSmartyPants", display_name="MisterSmartyPants"),
+            credentials=load_passkeys(rp_id),
+            user_verification=UserVerificationRequirement.REQUIRED,
+            authenticator_attachment=AuthenticatorAttachment.PLATFORM,
+        )
+        set_passkey_challenge(session, "register", state)
+        return {"publicKey": jsonable_encoder(dict(options.public_key))}
+
+
+@app.post("/api/passkey/register/verify")
+def passkey_register_verify(request: Request, payload: PasskeyResponse, response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, str]:
+    _, session, session_lock = get_session(msp_session, response)
+    with session_lock:
+        if session.locked:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Session is locked.")
+        try:
+            auth_data = passkey_server(request).register_complete(take_passkey_challenge(session, "register"), payload.credential)
+            if auth_data.credential_data is None:
+                raise ValueError("Authenticator returned no credential data.")
+            save_passkey(passkey_rp_id(request), auth_data.credential_data)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Passkey registration failed: {exc}") from exc
+    return {"status": "registered"}
+
+
+@app.post("/api/passkey/unlock/options")
+def passkey_unlock_options(request: Request, response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, object]:
+    _, session, session_lock = get_session(msp_session, response)
+    with session_lock:
+        rp_id = passkey_rp_id(request)
+        credentials = load_passkeys(rp_id)
+        if not credentials:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No passkey is registered for this site.")
+        options, state = passkey_server(request).authenticate_begin(
+            credentials=credentials,
+            user_verification=UserVerificationRequirement.REQUIRED,
+        )
+        set_passkey_challenge(session, "unlock", state)
+        return {"publicKey": jsonable_encoder(dict(options.public_key))}
+
+
+@app.post("/api/passkey/unlock/verify")
+def passkey_unlock_verify(request: Request, payload: PasskeyResponse, response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, str]:
+    _, session, session_lock = get_session(msp_session, response)
+    with session_lock:
+        try:
+            passkey_server(request).authenticate_complete(
+                take_passkey_challenge(session, "unlock"), load_passkeys(passkey_rp_id(request)), payload.credential
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Passkey verification failed.") from exc
+        session.locked = False
+        session.search_enabled = True
+        session.search_forced = False
+    return {"status": "unlocked"}
+
+
 @app.post("/api/new")
 def new_chat(response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, str]:
     _, session, session_lock = get_session(msp_session, response)
@@ -146,9 +296,10 @@ def new_chat(response: Response, msp_session: str | None = Cookie(default=None))
 
 
 class LiveJobBuffer(io.TextIOBase):
-    def __init__(self, job_id: str) -> None:
+    def __init__(self, job_id: str, publish_live: bool) -> None:
         super().__init__()
         self.job_id = job_id
+        self.publish_live = publish_live
         self.parts: list[str] = []
         self.lock = threading.Lock()
 
@@ -161,10 +312,11 @@ class LiveJobBuffer(io.TextIOBase):
         with self.lock:
             self.parts.append(text)
             output = "".join(self.parts)
-        with jobs_lock:
-            job = jobs.get(self.job_id)
-            if job is not None:
-                job["output"] = output
+        if self.publish_live:
+            with jobs_lock:
+                job = jobs.get(self.job_id)
+                if job is not None:
+                    job["output"] = output
         return len(text)
 
     def flush(self) -> None:
@@ -174,8 +326,15 @@ class LiveJobBuffer(io.TextIOBase):
         with self.lock:
             return "".join(self.parts)
 
+
+def concise_output(output: str) -> str:
+    marker = "[Assistant]"
+    if marker not in output:
+        return output
+    return output.rsplit(marker, 1)[1].lstrip("\r\n")
+
 def run_chat_job(job_id: str, session: ChatSession, session_lock: threading.Lock, message: str) -> None:
-    buffer = LiveJobBuffer(job_id)
+    buffer = LiveJobBuffer(job_id, publish_live=session.verbose_output)
     error: str | None = None
     with session_lock:
         try:
@@ -192,7 +351,8 @@ def run_chat_job(job_id: str, session: ChatSession, session_lock: threading.Lock
         job = jobs.get(job_id)
         if job is not None:
             job["done"] = True
-            job["output"] = buffer.getvalue()
+            output = buffer.getvalue()
+            job["output"] = output if session.verbose_output else concise_output(output)
             job["error"] = error
 
 @app.post("/api/chat")

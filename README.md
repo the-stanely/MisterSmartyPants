@@ -146,11 +146,24 @@ OLLAMA_NUM_THREAD=
 
 `OLLAMA_NUM_PREDICT` is the maximum generated-token budget for normal Ollama answers. Lowering it can speed up final responses if your model tends to produce long answers. Try `1024` or `2048` if speed matters more than long-form output. Ollama-based article summaries use `DECIDER_SUMMARY_MAX_TOKENS` instead.
 
+### OpenRouter final-answer provider
+
+Set `USE_OPENROUTER=true` and provide `OPENROUTER_API_KEY` to route LLM requests through OpenRouter instead of Ollama. `OPENROUTER_MODEL_CHAIN` is a comma-separated ordered fallback list for final answers. `OR_DECIDER_MODEL` routes the Ollama-style search decider and query builder, while `OR_SUMMARY_MODEL` routes Ollama-style article summaries. Empty specialized chains fall back to the final-answer chain.
+
+```dotenv
+USE_OPENROUTER=true
+OPENROUTER_API_KEY=your-key
+OPENROUTER_MODEL_CHAIN=inclusionai/ring-2.6-1t,openai/gpt-oss-120b,qwen/qwen3-32b,amazon/nova-micro-v1,openai/gpt-5.4-nano
+OR_DECIDER_MODEL=inclusionai/ling-2.6-flash,amazon/nova-micro-v1
+OR_SUMMARY_MODEL=inclusionai/ling-2.6-flash,amazon/nova-micro-v1
+```
+
 Search and fetch settings:
 
 ```env
-SEARCH_ENABLED=0
+SEARCH_ENABLED=1
 PASSWORD=
+PASSKEY_RP_ID=
 SEARCH_MODES=news,text
 SEARCH_NEWS_LIMIT=10
 SEARCH_TEXT_LIMIT=10
@@ -167,9 +180,11 @@ SOURCE_LINKS_MAX=5
 
 `SEARCH_NEWS_LIMIT` and `SEARCH_TEXT_LIMIT` control the initial DDGS search sample. `FETCH_SURVIVOR_N` controls how many post-Trafilatura survivors are collected before final reranking. `FETCH_TOP_N` controls how many final ranked sources are sent forward. `FETCH_WORKERS` is the fetch/extraction thread count. Lower it to reduce CPU and network pressure during article fetching; raise it to fetch more pages in parallel. `OLLAMA_NUM_THREAD` is optional; leave it blank to let Ollama choose, or set it to tune CPU threads for Ollama calls, including Ollama-based summaries.
 
-`SEARCH_ENABLED` controls whether search starts enabled in new chat sessions. Default is `0` (OFF). You can still toggle at runtime with `/search-on`, `/search-off`, and `/search-force`.
+`SEARCH_ENABLED` controls whether search starts enabled in new chat sessions. Default is `1` (ON). You can still toggle at runtime with `/search-on`, `/search-off`, and `/search-force`.
 
 `PASSWORD` is an optional comma-separated list of unlock passwords. When it is set, sessions start locked, and only `/unlock <password>` is accepted until a password matches. Leave it blank for no session lock.
+
+`PASSKEY_RP_ID` is optional. Set it to the public hostname serving the site (for example, `MisterSmartyPants.us`) to keep passkey configuration explicit. If blank, the server uses the request hostname. Do not include `https://` or a port.
 
 `SEARCH_META_ENRICH_ENABLED` toggles snippet enrichment from page metadata before the pre-fetch rank pass. `SEARCH_META_ENRICH_LIMIT` controls how many eligible text-mode results are enriched; set `0` for no cap.
 
@@ -258,6 +273,7 @@ Inside the chat, these slash commands are available:
 /llm-off           Skip the final LLM answer.
 /llm-on            Enable the final LLM answer.
 /new               Clear chat context.
+/llm-reload        Reload OpenRouter settings from .env.
 /prompt-off        Hide text sent to the answer/query LLM.
 /prompt-on         Show text sent to the answer/query LLM.
 /search-force      Enable forced full search answers; bypass decider.
@@ -271,7 +287,11 @@ In the web UI, slash commands work the same way and affect only that browser ses
 
 When `PASSWORD` is configured, sessions start locked. While locked, the system responds only to `/unlock <password>`.
 
+The web UI can also unlock with a registered passkey. First unlock with your password and select **Add passkey** on each device you want to use; afterward **Unlock with passkey** uses the phone or computer's built-in biometric/PIN prompt. The server stores only the public WebAuthn credential in its local `passkeys.json` file, which is intentionally ignored by Git. Passkeys require HTTPS in production and are tied to the site's hostname, so enroll from the same public domain you use on your phone.
+
 The web input helper text shows the current state as `Search is ON/OFF/FORCED. Ask something or use /?` and updates when you run `/search-on`, `/search-off`, or `/search-force`.
+
+The web UI starts in concise mode, showing only `You` and `Mr. Smarty Pants` final answers. Use `/verbose-on` to restore the search, model, and pipeline details; `/verbose-off` returns to concise mode.
 
 `/search <query>` is a strict search-engine mode: it bypasses the decider, query builder, and all LLM calls. It uses DDGS result metadata and fast meta-description enrichment (no full page extraction), ranks results with the metadata relevance ranker, and returns the top `SEARCH_ONLY_TOP_N` links with summaries.
 

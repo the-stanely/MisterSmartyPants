@@ -23,16 +23,38 @@
     main { width: 100%; max-width: 980px; margin: 0 auto; min-height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
     header { padding: 16px 18px; border-bottom: 1px solid #2b3035; }
     h1 { margin: 0; font-size: 20px; font-weight: 650; }
-    #log { padding: 16px 18px; overflow-y: auto; overflow-x: hidden; white-space: pre-wrap; line-height: 1.45; }
+    #log { padding: 16px 18px; overflow-y: auto; overflow-x: hidden; line-height: 1.45; }
     .turn { margin: 0 0 18px; }
     .user, .output, .status { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+    .user, .status { white-space: pre-wrap; }
     .user { color: #9fd3ff; }
+    .speaker { color: #a7f3d0; margin-top: 4px; }
     .output { color: #e8e8e8; }
+    .output > :first-child { margin-top: 0; }
+    .output > :last-child { margin-bottom: 0; }
+    .output p, .output ul, .output ol, .output blockquote, .output pre, .output table { margin: .7em 0; }
+    .output strong { font-weight: 800; color: #ffffff; }
+    .output em { font-style: italic; }
+    .output ul, .output ol { padding-left: 1.7em; }
+    .output li + li { margin-top: .25em; }
+    .output a { color: #75b7ff; }
+    .output blockquote { margin-left: 0; padding-left: .9em; border-left: 3px solid #4b5563; color: #c6cbd1; }
+    .output code { padding: .12em .3em; border-radius: 4px; background: #1d2329; font: .9em Consolas, ui-monospace, monospace; }
+    .output pre { padding: 12px; overflow-x: auto; border: 1px solid #30363d; border-radius: 6px; background: #161b22; }
+    .output pre code { padding: 0; background: transparent; }
+    .output table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+    .output th, .output td { padding: .4em .65em; border: 1px solid #3b424a; text-align: left; }
+    .output th { background: #1d2329; }
     .status { color: #8b949e; margin-top: 4px; min-height: 1.45em; }
     form { display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid #2b3035; }
     textarea { flex: 1; min-height: 84px; max-height: 180px; resize: vertical; border: 1px solid #3b424a; border-radius: 6px; padding: 10px; background: #171a1d; color: #f4f4f4; font: inherit; }
+    .unlock-entry { flex: 1; display: flex; align-items: center; min-height: 84px; border: 1px solid #3b424a; border-radius: 6px; padding: 10px; background: #171a1d; color: #9fd3ff; }
+    .unlock-entry[hidden] { display: none; }
+    .unlock-entry input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: #f4f4f4; font: inherit; }
     button { border: 1px solid #3b424a; border-radius: 6px; padding: 0 16px; background: #2563eb; color: white; font: inherit; cursor: pointer; }
     button:disabled { opacity: .55; cursor: wait; }
+    .passkey-controls { display: flex; gap: 8px; padding: 0 18px 12px; }
+    .passkey-controls button { min-height: 36px; padding: 0 10px; background: #334155; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -40,20 +62,84 @@
     <header><h1>MisterSmartyPants</h1> - A retrieval-augmented AI chat experiment.<div style="font-size:12px;color:#8b949e;margin-top:4px">build 2026-06-06 async-jobs</div></header>
     <section id="log" aria-live="polite"></section>
     <form id="chat-form">
-      <textarea id="message" placeholder="Search is OFF. Ask something or use /?" autofocus></textarea>
+      <textarea id="message" placeholder="Search is ON. Ask something or use /?" autofocus></textarea>
+      <label id="unlock-entry" class="unlock-entry" hidden><span id="unlock-prefix">/unlock&nbsp;</span><input id="unlock-password" type="password" autocomplete="current-password" aria-label="Unlock password" /></label>
       <button id="send" type="submit">Send</button>
     </form>
+    <div class="passkey-controls">
+      <button id="passkey-unlock" type="button">Unlock with passkey</button>
+      <button id="passkey-register" type="button">Add passkey</button>
+    </div>
   </main>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
   <script>
     const form = document.getElementById('chat-form');
     const message = document.getElementById('message');
+    const unlockEntry = document.getElementById('unlock-entry');
+    const unlockPassword = document.getElementById('unlock-password');
+    const unlockPrefix = document.getElementById('unlock-prefix');
     const log = document.getElementById('log');
     const send = document.getElementById('send');
+    const passkeyUnlock = document.getElementById('passkey-unlock');
+    const passkeyRegister = document.getElementById('passkey-register');
     let focusFollow = true;
-    let searchMode = 'OFF';
+    let searchMode = 'ON';
+    let verboseMode = false;
 
     function updateMessagePlaceholder() {
       message.placeholder = `Search is ${searchMode}. Ask something or use /?`;
+    }
+
+    function updateSearchModeFromResponse(command, output) {
+      const normalizedOutput = (output || '').trim();
+      const commandResponses = {
+        '/search-on': ['[System] Search enabled.', 'ON'],
+        '/search-off': ['[System] Search disabled. Prompts will be sent directly to the LLM.', 'OFF'],
+        '/search-force': ['[System] Search forced. Search decider will be bypassed.', 'FORCED'],
+      };
+      const expected = commandResponses[command];
+      if (expected && normalizedOutput.includes(expected[0])) {
+        searchMode = expected[1];
+        updateMessagePlaceholder();
+      }
+      if (command.startsWith('/unlock') && normalizedOutput.includes('[System] Unlocked.')) {
+        searchMode = 'ON';
+        updateMessagePlaceholder();
+      }
+    }
+
+    function updateVerboseModeFromResponse(command, output) {
+      const normalizedOutput = (output || '').trim();
+      if (command === '/verbose-on' && normalizedOutput.includes('[System] Verbose output enabled.')) verboseMode = true;
+      if (command === '/verbose-off' && normalizedOutput.includes('[System] Verbose output disabled.')) verboseMode = false;
+    }
+
+    function unlockPasswordMode() {
+      return !unlockEntry.hidden;
+    }
+
+    function showUnlockPasswordEntry(prefix) {
+      unlockPrefix.textContent = prefix;
+      message.hidden = true;
+      unlockEntry.hidden = false;
+      unlockPassword.value = '';
+      unlockPassword.focus();
+    }
+
+    function hideUnlockPasswordEntry() {
+      unlockEntry.hidden = true;
+      message.hidden = false;
+      unlockPassword.value = '';
+    }
+
+    function currentMessage() {
+      return unlockPasswordMode() ? `${unlockPrefix.textContent}${unlockPassword.value}` : message.value;
+    }
+
+    function clearMessage() {
+      message.value = '';
+      hideUnlockPasswordEntry();
     }
 
     updateMessagePlaceholder();
@@ -61,7 +147,9 @@
     function appendTurn(input, output, forceScroll = false) {
       const block = document.createElement('div');
       block.className = 'turn';
-      block.innerHTML = `<div class="user">AI ready&gt; ${escapeHtml(input)}</div><div class="output">${renderOutputHtml(output)}</div><div class="status"></div>`;
+      const userLabel = verboseMode ? 'AI ready&gt;' : 'You&gt;';
+      const assistantLabel = verboseMode ? '' : '<div class="speaker">Mr. Smarty Pants&gt;</div>';
+      block.innerHTML = `<div class="user">${userLabel} ${escapeHtml(displayInput(input))}</div>${assistantLabel}<div class="output">${renderOutputHtml(output)}</div><div class="status"></div>`;
       log.appendChild(block);
       scrollToBottom(forceScroll);
     }
@@ -74,11 +162,31 @@
       return text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
     }
 
+    function displayInput(text) {
+      return /^\/unlock\s+\S+/i.test(text) ? text.replace(/^(\/unlock\s+).*/, '$1***') : text;
+    }
+
     function renderOutputHtml(text) {
-      const escaped = escapeHtml(text || '');
-      return escaped
-        .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-        .replace(/\n/g, '<br>');
+      const source = text || '';
+      if (!window.marked || !window.DOMPurify) {
+        return escapeHtml(source).replace(/\n/g, '<br>');
+      }
+
+      const rendered = window.marked.parse(source, { gfm: true, breaks: true });
+      const sanitized = window.DOMPurify.sanitize(rendered, {
+        ALLOWED_TAGS: [
+          'a', 'blockquote', 'br', 'code', 'del', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+          'hr', 'li', 'ol', 'p', 'pre', 'strong', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'ul',
+        ],
+        ALLOWED_ATTR: ['href', 'title'],
+      });
+      const container = document.createElement('div');
+      container.innerHTML = sanitized;
+      container.querySelectorAll('a[href]').forEach(link => {
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+      });
+      return container.innerHTML;
     }
 
     function sleep(ms) {
@@ -99,12 +207,96 @@
       return {error: await res.text()};
     }
 
+    function base64urlToBuffer(value) {
+      const base64 = value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4);
+      const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0));
+      return bytes.buffer;
+    }
+
+    function bufferToBase64url(value) {
+      const bytes = new Uint8Array(value);
+      let binary = '';
+      bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+      return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    function preparePublicKeyOptions(options, registration) {
+      const prepared = {...options, challenge: base64urlToBuffer(options.challenge)};
+      if (registration) {
+        prepared.user = {...options.user, id: base64urlToBuffer(options.user.id)};
+        prepared.excludeCredentials = (options.excludeCredentials || []).map(item => ({...item, id: base64urlToBuffer(item.id)}));
+      } else {
+        prepared.allowCredentials = (options.allowCredentials || []).map(item => ({...item, id: base64urlToBuffer(item.id)}));
+      }
+      return prepared;
+    }
+
+    function serializeCredential(credential) {
+      const response = credential.response;
+      const data = {
+        id: credential.id,
+        rawId: bufferToBase64url(credential.rawId),
+        type: credential.type,
+        response: {clientDataJSON: bufferToBase64url(response.clientDataJSON)},
+        clientExtensionResults: credential.getClientExtensionResults(),
+      };
+      if (response.attestationObject) {
+        data.response.attestationObject = bufferToBase64url(response.attestationObject);
+      } else {
+        data.response.authenticatorData = bufferToBase64url(response.authenticatorData);
+        data.response.signature = bufferToBase64url(response.signature);
+        data.response.userHandle = response.userHandle ? bufferToBase64url(response.userHandle) : null;
+      }
+      return data;
+    }
+
+    async function passkeyRequest(path, body) {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await readJsonResponse(res);
+      if (!res.ok || data.detail || data.error) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    async function usePasskey(kind) {
+      if (!window.PublicKeyCredential) throw new Error('Passkeys are not supported by this browser.');
+      const register = kind === 'register';
+      const prefix = register ? '/api/passkey/register' : '/api/passkey/unlock';
+      const options = await passkeyRequest(`${prefix}/options`);
+      const credential = register
+        ? await navigator.credentials.create({publicKey: preparePublicKeyOptions(options.publicKey, true)})
+        : await navigator.credentials.get({publicKey: preparePublicKeyOptions(options.publicKey, false)});
+      if (!credential) throw new Error('No passkey was selected.');
+      await passkeyRequest(`${prefix}/verify`, {credential: serializeCredential(credential)});
+      if (!register) {
+        searchMode = 'ON';
+        updateMessagePlaceholder();
+      }
+      appendTurn(register ? 'Add passkey' : 'Unlock with passkey', `[System] Passkey ${register ? 'registered.' : 'unlocked.'}`, true);
+      message.focus();
+    }
+
+    passkeyUnlock.addEventListener('click', async () => {
+      passkeyUnlock.disabled = true;
+      try { await usePasskey('unlock'); } catch (err) { appendTurn('Unlock with passkey', `[System] ${err.message}`, true); }
+      finally { passkeyUnlock.disabled = false; }
+    });
+
+    passkeyRegister.addEventListener('click', async () => {
+      passkeyRegister.disabled = true;
+      try { await usePasskey('register'); } catch (err) { appendTurn('Add passkey', `[System] ${err.message}`, true); }
+      finally { passkeyRegister.disabled = false; }
+    });
+
     form.addEventListener('submit', async event => {
       event.preventDefault();
-      const text = message.value.trim();
+      const text = currentMessage().trim();
       if (!text) return;
       const lowerText = text.toLowerCase();
-      message.value = '';
+      clearMessage();
       if (lowerText === '/focus-off') {
         focusFollow = false;
         appendSystem(text);
@@ -117,18 +309,6 @@
         scrollToBottom(true);
         message.focus();
         return;
-      }
-      if (lowerText === '/search-on') {
-        searchMode = 'ON';
-        updateMessagePlaceholder();
-      }
-      if (lowerText === '/search-off') {
-        searchMode = 'OFF';
-        updateMessagePlaceholder();
-      }
-      if (lowerText === '/search-force') {
-        searchMode = 'FORCED';
-        updateMessagePlaceholder();
       }
       send.disabled = true;
       appendTurn(text, '');
@@ -152,6 +332,8 @@
         }
         if (started.done || !started.job_id) {
           current.innerHTML = renderOutputHtml(started.output || '');
+          updateSearchModeFromResponse(lowerText, started.output);
+          updateVerboseModeFromResponse(lowerText, started.output);
           statusLine.textContent = '';
           scrollToBottom();
           return;
@@ -177,6 +359,8 @@
           }
           if (data.done) {
             current.innerHTML = renderOutputHtml(data.output || '');
+            updateSearchModeFromResponse(lowerText, data.output);
+            updateVerboseModeFromResponse(lowerText, data.output);
             statusLine.textContent = '';
             scrollToBottom();
             return;
@@ -196,6 +380,25 @@
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         form.requestSubmit();
+      }
+    });
+
+    message.addEventListener('input', () => {
+      if (/^\/unlock\s+$/i.test(message.value)) {
+        showUnlockPasswordEntry(message.value);
+      }
+    });
+
+    unlockPassword.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+      if (event.key === 'Escape' || (event.key === 'Backspace' && !unlockPassword.value)) {
+        event.preventDefault();
+        hideUnlockPasswordEntry();
+        message.value = unlockPrefix.textContent;
+        message.focus();
       }
     });
   </script>

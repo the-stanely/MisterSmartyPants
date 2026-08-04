@@ -9,4 +9,6 @@ torch
 trafilatura
 transformers
 fastapi
+fido2
+pytest
 uvicorn

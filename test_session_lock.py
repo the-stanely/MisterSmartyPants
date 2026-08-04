@@ -9,6 +9,7 @@ def test_session_starts_unlocked_without_passwords(monkeypatch) -> None:
     session = websearchMCP.ChatSession(rich_output=False)
 
     assert session.locked is False
+    assert session.verbose_output is False
 
 
 def test_session_unlocks_with_configured_password(monkeypatch, capsys) -> None:
@@ -69,6 +70,26 @@ def test_search_on_and_off_clear_forced_mode(monkeypatch) -> None:
     assert session.handle_input("/search-off") is True
     assert session.search_enabled is False
     assert session.search_forced is False
+
+
+def test_unlock_and_verbose_commands_restore_normal_session_mode(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(websearchMCP, "UNLOCK_PASSWORDS", ("alpha",))
+    session = websearchMCP.ChatSession(rich_output=False)
+    session.search_enabled = False
+    session.search_forced = True
+
+    assert session.handle_input("/unlock alpha") is True
+    assert session.search_enabled is True
+    assert session.search_forced is False
+
+    assert session.handle_input("/verbose-off") is True
+    assert session.verbose_output is False
+    assert session.handle_input("/verbose-on") is True
+    assert session.verbose_output is True
+
+    output = capsys.readouterr().out
+    assert "[System] Verbose output disabled." in output
+    assert "[System] Verbose output enabled." in output
 
 
 def test_fetched_html_error_reason_detects_cloudflare_footer() -> None:
