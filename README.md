@@ -2,7 +2,7 @@
 
 MisterSmartyPants is a local AI chat demo that combines an Ollama-hosted chat model with built-in search. Live web search is triggered when a query needs current information or knowledge beyond the model's training. Search articles are extracted, scored for relevance, and summarized before being sent to the chat LLM. It is important to note that not all LLMs reliably use new information supplied in context; models that handle RAG-style context well will perform best.
 
-This demo was developed on a slow CPU-only, memory-bound system, yet it performs surprisingly well. The chat LLM as configured is llama3.2:latest. Several lightweight local models are also used to decide when to search and to process search results. The default summary path uses Ollama, while the search decider and relevance filter use Python models.
+This demo was developed on a slow CPU-only, memory-bound system, yet it performs surprisingly well. It supports local Ollama models and OpenRouter model chains. In the current default configuration, a strong OpenRouter planner decides whether ordinary conversational turns need web search, while local Hugging Face models remain available for decider, ranking, and summary paths.
 
 This project started as a practical experiment in making local models better at current-event questions without dumping raw search results into the final LLM prompt. The current pipeline tries to keep the slow, capable model focused on clean, relevant, current source material.
 
@@ -25,8 +25,8 @@ For search-backed answers, the pipeline is roughly:
 
 ```text
 user question
-  -> search decider (Python Transformers)
-  -> query builder (Ollama)
+  -> explicit command / forced-search rule, or search planner
+  -> planner-supplied search query when search is needed
   -> web search (DDGS)
   -> metadata enrichment (optional)
   -> pre-fetch relevance rank (title/url/date/snippet)
@@ -34,16 +34,16 @@ user question
   -> URL-based API adapters (supported domains)
   -> fallback extraction (GitHub API, then Trafilatura)
   -> post-fetch relevance rank (with extracted text)
-  -> article summarization (Ollama by default, Python Transformers optional)
-  -> final LLM answer (Python requests + Ollama HTTP API)
+  -> optional article summarization (Ollama/OpenRouter or Python Transformers)
+  -> final LLM answer (Ollama or OpenRouter)
 ```
 
 The goal is to reduce prompt bloat, keep poor search results away from the final answer model, and improve performance on slow hardware.
 
 ## Features
 
-- Local Ollama final answer model
-- Ollama or Python/Transformers search decider
+- Ollama or OpenRouter final answer model chains
+- Strong OpenRouter search planner, plus optional Ollama or Python/Transformers deciders
 - DDGS web search using news and text search modes
 - URL-based API adapters for Wikipedia, arXiv, Stack Exchange, and Hacker News
 - URL-aware GitHub API fetching for GitHub profile and repository results
@@ -53,7 +53,7 @@ The goal is to reduce prompt bloat, keep poor search results away from the final
 - Configurable article summarization through Ollama or Python Transformers
 - Rich Markdown terminal rendering
 - Browser chat UI through FastAPI
-- Per-browser session isolation for the HTTP server
+- Per-browser sessions with mobile-friendly cookie renewal and local transcript restore
 - Slash commands for debugging and testing
 - `.env.example` configuration template
 - Windows PowerShell install/run scripts
@@ -62,8 +62,8 @@ The goal is to reduce prompt bloat, keep poor search results away from the final
 
 - Windows PowerShell
 - Python 3.10 or newer
-- Ollama installed and running
-- At least one Ollama chat model pulled locally
+- Ollama installed and running, or an OpenRouter API key and model chain
+- At least one local Ollama model only when using Ollama-based answer or summary paths
 - Internet access for web search and first-time Hugging Face model downloads
 
 The installer script can install Python 3.11 with `winget` if Python is missing.
@@ -148,14 +148,15 @@ OLLAMA_NUM_THREAD=
 
 ### OpenRouter final-answer provider
 
-Set `USE_OPENROUTER=true` and provide `OPENROUTER_API_KEY` to route LLM requests through OpenRouter instead of Ollama. `OPENROUTER_MODEL_CHAIN` is a comma-separated ordered fallback list for final answers. `OR_DECIDER_MODEL` routes the Ollama-style search decider and query builder, while `OR_SUMMARY_MODEL` routes Ollama-style article summaries. Empty specialized chains fall back to the final-answer chain.
+Set `USE_OPENROUTER=true` and provide `OPENROUTER_API_KEY` to route LLM requests through OpenRouter instead of Ollama. `OPENROUTER_MODEL_CHAIN` is a comma-separated ordered fallback list for final answers. `OR_PLANNER_MODEL` is the ordered chain for `SEARCH_DECIDER=planner`; `OR_DECIDER_MODEL` is retained for the legacy Ollama decider; and `OR_SUMMARY_MODEL` routes Ollama-compatible article summaries. An empty specialized chain falls back to `OPENROUTER_MODEL_CHAIN`.
 
 ```dotenv
 USE_OPENROUTER=true
 OPENROUTER_API_KEY=your-key
-OPENROUTER_MODEL_CHAIN=inclusionai/ring-2.6-1t,openai/gpt-oss-120b,qwen/qwen3-32b,amazon/nova-micro-v1,openai/gpt-5.4-nano
-OR_DECIDER_MODEL=inclusionai/ling-2.6-flash,amazon/nova-micro-v1
-OR_SUMMARY_MODEL=inclusionai/ling-2.6-flash,amazon/nova-micro-v1
+OPENROUTER_MODEL_CHAIN=openai/gpt-5.4-nano,openai/gpt-oss-120b,nvidia/nemotron-3-super-120b-a12b,deepseek/deepseek-v4-flash-0731,inclusionai/ring-2.6-1t,qwen/qwen3-32b
+OR_PLANNER_MODEL=openai/gpt-5.4-nano,deepseek/deepseek-v4-flash-0731
+OR_DECIDER_MODEL=openai/gpt-5.4-nano,deepseek/deepseek-v4-flash-0731
+OR_SUMMARY_MODEL=openai/gpt-5.4-nano,deepseek/deepseek-v4-flash-0731
 ```
 
 Search and fetch settings:
@@ -173,6 +174,9 @@ FETCH_WORKERS=4
 SEARCH_META_ENRICH_ENABLED=1
 SEARCH_META_ENRICH_LIMIT=5
 SEARCH_CONTEXT_HISTORY_MAX_CHARS=0
+ROUTING_CONTEXT_MAX_CHARS=6000
+SESSION_COOKIE_MAX_AGE_SECONDS=2592000
+SESSION_COOKIE_SECURE=1
 SEARCH_ONLY_TOP_N=10
 APPEND_SOURCE_LINKS=1
 SOURCE_LINKS_MAX=5
@@ -190,6 +194,10 @@ SOURCE_LINKS_MAX=5
 
 `SEARCH_CONTEXT_HISTORY_MAX_CHARS` controls how much of each search turn's evidence block is persisted into chat history for follow-up questions (including when `/search-off` is enabled). Set `0` to keep full search context (default), or set a positive cap to limit history growth.
 
+`ROUTING_CONTEXT_MAX_CHARS` bounds recent user/assistant dialogue supplied to routing models. Prior web-search evidence is excluded from this routing context. Set it to `0` to disable conversational routing context.
+
+`SESSION_COOKIE_MAX_AGE_SECONDS` controls the renewed browser-session lifetime. Set `SESSION_COOKIE_SECURE=1` for HTTPS deployments; use `0` only for local HTTP development.
+
 `SEARCH_ONLY_TOP_N` controls how many ranked results search-only commands keep (for example `/search`, `/news`, `/finance`).
 
 `APPEND_SOURCE_LINKS` appends missing source URLs to answers after generation so links are present even if the model ignores prompt instructions. `SOURCE_LINKS_MAX` limits how many links are appended.
@@ -197,25 +205,25 @@ SOURCE_LINKS_MAX=5
 Search decision settings:
 
 ```env
-SEARCH_DECIDER=ollama
-DECIDER_MODEL=gemma2:2B
+SEARCH_DECIDER=planner
+DECIDER_MODEL=Qwen/Qwen2.5-0.5B-Instruct
 FORCE_SEARCH_MARKERS=
 ```
 
-`DECIDER_MODEL` is a Hugging Face model id when `SEARCH_DECIDER=python`, and an Ollama model name when `SEARCH_DECIDER=ollama`. `FORCE_SEARCH_MARKERS` is a comma-separated list of keywords that force a search regardless of the decider result. It is empty by default; add terms to override the decider for obvious search queries.
+`SEARCH_DECIDER=planner` uses `PLANNER_SYSTEM_PROMPT` and `OR_PLANNER_MODEL` to make one strong-model answer/search plan for ordinary turns. It returns either an answer decision or a concise DDGS query, so the legacy query-builder stage is skipped. `SEARCH_DECIDER=python` uses a local Hugging Face `DECIDER_MODEL`; `SEARCH_DECIDER=ollama` uses an Ollama-compatible model. `FORCE_SEARCH_MARKERS` is a comma-separated list of keywords that force a search before any model routing.
 
 Summarization settings:
 
 ```env
-SUMMARIZE_EXCERPTS=1
+SUMMARIZE_EXCERPTS=0
 SUMMARY_PROVIDER=ollama
-SUMMARY_MODEL=gemma2:2B
-SUMMARIZE_EXCERPTS_MIN_CHARS=200000
+SUMMARY_MODEL=gemma2:2b
+SUMMARIZE_EXCERPTS_MIN_CHARS=100000
 DECIDER_SUMMARY_MAX_TOKENS=300
 DECIDER_SUMMARY_PROMPT="User question:\n{user_question}\n...\nArticle:\n{excerpt_text}"
 ```
 
-`SUMMARIZE_EXCERPTS_MIN_CHARS` controls when the excerpt summarizer runs. Set it to `0` to summarize every search payload when `SUMMARIZE_EXCERPTS=1`, or raise it to only summarize very large result sets. For your timeout case, a threshold above the assembled search payload size will skip summarization for smaller searches and only activate it when the input gets large.
+`SUMMARIZE_EXCERPTS` is disabled in the checked-in configuration. When enabled, `SUMMARIZE_EXCERPTS_MIN_CHARS` controls when the excerpt summarizer runs: set it to `0` to summarize every search payload, or raise it to summarize only large result sets.
 
 Relevance ranking settings:
 
@@ -227,7 +235,7 @@ DECIDER_RELEVANCE_EXCERPT_CHARS=1200
 
 The cross-encoder is now used twice as a numeric ranker: first over DDGS result metadata before fetch, then again over extracted Trafilatura article text after post-fetch rejection. `RELEVANCY_THRESHOLD` may still exist in older `.env` files, but the current main search path ranks and selects top results instead of using it as the primary article gate.
 
-Prompt settings are also in `.env`, including the final answer prompt, query builder prompt, memory-answer prompt, search-decider prompts, and article-summary prompt. The query builder uses `DECIDER_MODEL` through Ollama to rewrite conversational requests into concise search queries before DDGS runs. The Ollama search-decider prompt supports `{today_date}` and `{user_prompt}` and maps `YES` to answer from model knowledge and `NO` to search. The article-summary prompt supports `{user_question}` and `{excerpt_text}` so summaries can be focused on the original request.
+Prompt settings are also in `.env`, including the final answer prompt, planner prompt, legacy query-builder and decider prompts, memory-answer prompt, and article-summary prompt. `PLANNER_SYSTEM_PROMPT` receives bounded recent dialogue and the latest request, and must return JSON with either `{"action":"ANSWER"}` or `{"action":"SEARCH","query":"..."}`. The legacy query builder is used only outside planner mode for conversational search follow-ups. The article-summary prompt supports `{user_question}` and `{excerpt_text}` so summaries can be focused on the original request.
 
 Prompt environment variables are required. Startup exits with a fatal error if any required prompt variable is missing or empty.
 
@@ -256,11 +264,11 @@ Inside the chat, these slash commands are available:
 
 [Search & Lookup]
 /arxiv <query>     Run search only against arXiv.
-/decider <prompt>  Run configured decider and query builder only; bypass rules, search, and LLM.
+/decider <prompt>  Run configured planner/decider only; bypass rules, search, and final-answer LLM.
 /finance <query>   Run search only for finance news.
 /hn <query>        Run search only against Hacker News.
 /news <query>      Run search only for current news.
-/search <query>    Run search only; bypass decider, query builder, and answer LLM.
+/search <query>    Run search only; bypass planner/decider and answer LLM.
 /stack <query>     Run search only against Stack Overflow/Exchange.
 /stocks <query>    Run search only for stock market news.
 /weather <query>   Run search only for weather results for a city/state.
@@ -280,6 +288,8 @@ Inside the chat, these slash commands are available:
 /search-off        Disable search; answer from prior context.
 /search-on         Enable search and decider logic.
 /unlock <password> Unlock command processing.
+/verbose-off       Web UI: show final answers only.
+/verbose-on        Web UI: show pipeline details.
 exit, quit, q      Exit.
 ```
 
@@ -287,15 +297,23 @@ In the web UI, slash commands work the same way and affect only that browser ses
 
 When `PASSWORD` is configured, sessions start locked. While locked, the system responds only to `/unlock <password>`.
 
-The web UI can also unlock with a registered passkey. First unlock with your password and select **Add passkey** on each device you want to use; afterward **Unlock with passkey** uses the phone or computer's built-in biometric/PIN prompt. The server stores only the public WebAuthn credential in its local `passkeys.json` file, which is intentionally ignored by Git. Passkeys require HTTPS in production and are tied to the site's hostname, so enroll from the same public domain you use on your phone.
+### Biometric/passkey unlock
+
+The web UI can unlock with a registered platform passkey, using the phone or computer’s built-in biometric check or device PIN. First unlock with `/unlock <password>`, then select **Add passkey** on each device you want to authorize. Later, select **Unlock with passkey** instead of entering the password.
+
+The server stores only the public WebAuthn credential in its local `passkeys.json` file; biometric data and private keys never leave the device. `passkeys.json` is intentionally ignored by Git.
+
+Passkeys require HTTPS in production and are tied to the exact public hostname. Set `PASSKEY_RP_ID` to that hostname (for example, `MisterSmartyPants.us`, without `https://` or a port), and enroll from the same hostname on the phone or computer that will use it.
+
+Passkeys currently provide site-level unlock access, not separate user accounts: any registered passkey can unlock a new browser session. This is suitable for a small trusted deployment. The unlocked state remains in the server’s in-memory chat session; after a server restart, unlock again with a password or passkey.
 
 The web input helper text shows the current state as `Search is ON/OFF/FORCED. Ask something or use /?` and updates when you run `/search-on`, `/search-off`, or `/search-force`.
 
 The web UI starts in concise mode, showing only `You` and `Mr. Smarty Pants` final answers. Use `/verbose-on` to restore the search, model, and pipeline details; `/verbose-off` returns to concise mode.
 
-`/search <query>` is a strict search-engine mode: it bypasses the decider, query builder, and all LLM calls. It uses DDGS result metadata and fast meta-description enrichment (no full page extraction), ranks results with the metadata relevance ranker, and returns the top `SEARCH_ONLY_TOP_N` links with summaries.
+`/search <query>` is a strict search-engine mode: it bypasses the planner/decider and all LLM calls. It uses DDGS result metadata and fast meta-description enrichment (no full page extraction), ranks results with the metadata relevance ranker, and returns the top `SEARCH_ONLY_TOP_N` links with summaries.
 
-`/search-force` switches the session into forced search mode. Subsequent normal prompts use the full search-backed answer pipeline and skip only the search decider; query building, DDGS search, fetch/extraction, ranking, summarization, final answer generation, source-link appending, and history updates still run. Use `/search-on` to return to decider-controlled search, or `/search-off` to answer from memory and prior context.
+`/search-force` switches the session into forced search mode. Subsequent normal prompts use the full search-backed answer pipeline and skip only the planner/decider; DDGS search, fetch/extraction, ranking, optional summarization, final answer generation, source-link appending, and history updates still run. Use `/search-on` to return to planner/decider-controlled search, or `/search-off` to answer from memory and prior context.
 
 `/arxiv <query>` and `/wiki <query>` are the same no-LLM mode, but with the search query biased to `arxiv.org` or `wikipedia.org/wiki` so the results stay domain-specific.
 
@@ -335,6 +353,7 @@ API endpoints:
 
 ```text
 GET  /api/health
+GET  /api/session        Check whether this browser still has server conversation context
 POST /api/chat           Start a chat job
 GET  /api/chat/{job_id}  Poll a chat job until it is done
 POST /api/new
@@ -350,7 +369,7 @@ GET /sitemap.xml
 
 The crawler files live in `static/robots.txt` and `static/sitemap.xml`. Update the sitemap URL if you host the demo on a different domain.
 
-The server uses an `msp_session` cookie. Each browser session gets its own `ChatSession`, including its own history and slash-command state. Chat requests run as background jobs so reverse proxies and Cloudflare do not have to hold one long request open. The browser polls job status and shows a changing `[working...]` indicator while the job runs.
+The server uses a renewed persistent `msp_session` cookie. Each browser session gets its own in-memory `ChatSession`, including history and slash-command state. The browser also restores up to 100 recent turns from device-local storage after a reload. If the server no longer has the matching chat context—for example after a server restart—the UI labels those restored turns as review-only rather than implying they will affect the next answer. Chat requests run as background jobs so reverse proxies and Cloudflare do not have to hold one long request open. The browser polls job status and shows a changing `[working...]` indicator while the job runs.
 
 The server also has a small in-memory bot guard: if one client IP receives 3 consecutive 404 responses, that IP is blocked for 10 minutes. Behind Cloudflare, the server uses `CF-Connecting-IP`; behind other proxies it falls back to the first `X-Forwarded-For` value, then the socket IP. HTTP request logs are timestamped, and block start/deny/expiry events are logged explicitly.
 
@@ -374,30 +393,29 @@ Do not expose Ollama directly. Expose only the MisterSmartyPants HTTP server.
 
 The search pipeline intentionally avoids sending raw search result dumps directly to the final LLM. Search result quality and user question intent are still the weakest links in this workflow. MisterSmartyPants uses a free search backend; if the initial search candidates are poor, extraction, relevance scoring, and summarization can only recover so much. A dedicated paid search or news API will likely improve answer quality more than additional prompt tuning. Many search results include browser-rendered content that's difficult to extract. They include graphics, tables, sliders, etc.
 
-User intent could also use some work. My experience is that models below 1B can't reliably divine the user's intent. The decider LLM scores whether the request needs search or can be answered from model knowledge. Because of my low-end test hardware (Intel I7-8700, 16GB), a 0.5B model is used.
+For ordinary turns, the configured planner makes the answer-versus-search decision with the latest request and bounded recent dialogue. This avoids asking a small local model to reinterpret a conversational follow-up before a stronger online answer model sees it. Local Python and Ollama deciders remain available for lower-cost deployments.
 
 Current behavior:
 
-1. The search decider decides whether current web data is needed. A keyword intent detector is used to force obvious search cases.
-2. The query builder rewrites the prompt into a concise DDGS query.
-3. DDGS runs configured search modes, usually 10 news results plus 10 text results.
-4. Candidate URLs are deduplicated.
-5. Optional metadata enrichment updates snippets for eligible text-mode results before ranking.
-6. A cross-encoder ranks the search-result sample using title, URL, date, and snippet.
-7. Pages are fetched in ranked order until the pipeline has enough post-fetch survivors or runs out of candidates.
-8. The fetch step first tries URL-based API adapters for supported domains (Wikipedia, arXiv, Stack Exchange, Hacker News), then GitHub API for GitHub URLs, then Trafilatura for general HTML pages.
-9. Post-fetch rejection removes fetch failures, empty/short extractions, redirected homepages, ad/tracking URLs, YouTube current-info results, and near-duplicates. For current-info queries, stale-result rejection does not begin until 5 articles have already survived post-fetch checks, and freshness is based on the newer of the parsed published date or the newest non-requested year detected in the title, URL, or extracted text.
-10. A cross-encoder reranks surviving extracted articles using metadata plus extracted text.
-11. The top 5 articles are summarized by the configured summary provider, usually Ollama.
-12. The final Ollama model receives the user question and summarized current source material.
-13. Missing source links are appended deterministically from validated fetched URLs when `APPEND_SOURCE_LINKS=1`.
+1. Explicit slash commands and `FORCE_SEARCH_MARKERS` take priority. For other turns, the planner decides whether current web data is needed and supplies a concise search query when it is.
+2. DDGS runs configured search modes, usually 10 news results plus 10 text results.
+3. Candidate URLs are deduplicated.
+4. Optional metadata enrichment updates snippets for eligible text-mode results before ranking.
+5. A cross-encoder ranks the search-result sample using title, URL, date, and snippet.
+6. Pages are fetched in ranked order until the pipeline has enough post-fetch survivors or runs out of candidates.
+7. The fetch step first tries URL-based API adapters for supported domains (Wikipedia, arXiv, Stack Exchange, Hacker News), then GitHub API for GitHub URLs, then Trafilatura for general HTML pages.
+8. Post-fetch rejection removes fetch failures, empty/short extractions, redirected homepages, ad/tracking URLs, YouTube current-info results, and near-duplicates. For current-info queries, stale-result rejection does not begin until 5 articles have already survived post-fetch checks, and freshness is based on the newer of the parsed published date or the newest non-requested year detected in the title, URL, or extracted text.
+9. A cross-encoder reranks surviving extracted articles using metadata plus extracted text.
+10. The top fetched articles are optionally summarized by the configured summary provider. Summarization is disabled in the checked-in configuration.
+11. The final Ollama or OpenRouter model receives the original user request, prior context, and current source material.
+12. Missing source links are appended deterministically from validated fetched URLs when `APPEND_SOURCE_LINKS=1`.
 
 Useful logs include:
 
 ```text
-[Search decider said ANSWER in nnn ms]
-[Search decider said SEARCH in nnn ms, Search = x.xxx, Answer = y.yyy]
-[Query builder: nnn ms, "concise search query"]
+[Search planner said ANSWER in nnn ms]
+[Search planner said SEARCH in nnn ms]
+[Search planner query: "concise search query"]
 [Search rank: nnn candidates, model]
 [Fetch rank: nnn survivors -> 5 sources]
 [Search: nnn ms, nnn chars]
@@ -411,7 +429,7 @@ With `/prompt-on`, relevance debug output also shows the exact metadata and extr
 
 Python models are loaded through Hugging Face and cached locally.
 
-When `SEARCH_DECIDER=python`, the Python decider model uses local-first Hugging Face snapshot loading. The relevance cross-encoder also uses local-first snapshot loading. If `SUMMARY_PROVIDER=python`, the summary model uses the same local-first Hugging Face cache path. If `SUMMARY_PROVIDER=ollama`, the summary model must be available in Ollama, for example with `ollama pull gemma2:2b`.
+When `SEARCH_DECIDER=python`, the Python decider model uses local-first Hugging Face snapshot loading. The relevance cross-encoder also uses local-first snapshot loading. If `SUMMARY_PROVIDER=python`, the summary model uses the same local-first Hugging Face cache path. If `SUMMARY_PROVIDER=ollama` and `USE_OPENROUTER=false`, the summary model must be available in Ollama, for example with `ollama pull gemma2:2b`. When `USE_OPENROUTER=true`, Ollama-compatible summary calls use `OR_SUMMARY_MODEL` instead.
 
 First run may download Python model files. Later runs should use the local Hugging Face cache.
 
