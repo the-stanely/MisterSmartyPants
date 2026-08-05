@@ -63,6 +63,11 @@ OR_DECIDER_MODEL = tuple(
     for model in os.getenv("OR_DECIDER_MODEL", "").split(",")
     if model.strip()
 )
+OR_PLANNER_MODEL = tuple(
+    model.strip()
+    for model in os.getenv("OR_PLANNER_MODEL", "").split(",")
+    if model.strip()
+)
 OR_SUMMARY_MODEL = tuple(
     model.strip()
     for model in os.getenv("OR_SUMMARY_MODEL", "").split(",")
@@ -152,6 +157,7 @@ ANSWER_FROM_RESULTS_PROMPT = require_env_prompt("ANSWER_FROM_RESULTS_PROMPT")
 ANSWER_FROM_RESULTS_EXTRA_SYSTEM_PROMPT = require_env_prompt("ANSWER_FROM_RESULTS_EXTRA_SYSTEM_PROMPT")
 QWEN_DECIDER_SYSTEM_PROMPT = require_env_prompt("QWEN_DECIDER_SYSTEM_PROMPT")
 QUERY_BUILDER_SYSTEM_PROMPT = require_env_prompt("QUERY_BUILDER_SYSTEM_PROMPT")
+PLANNER_SYSTEM_PROMPT = require_env_prompt("PLANNER_SYSTEM_PROMPT")
 OLLAMA_DECIDER_SYSTEM_PROMPT = require_env_prompt("OLLAMA_DECIDER_SYSTEM_PROMPT")
 MEMORY_ANSWER_SYSTEM_PROMPT = require_env_prompt("MEMORY_ANSWER_SYSTEM_PROMPT")
 AD_URL_MARKERS = (
@@ -176,8 +182,14 @@ PREFERRED_SOURCE_DOMAINS = tuple(
     if domain.strip()
 )
 CURRENT_NEWS_MARKERS = ("latest", "today", "yesterday", "current", "recent", "news", "what happened")
+CONTEXTUAL_QUERY_MARKERS = re.compile(
+    r"\b(it|its|they|them|this|that|these|those|there|one)\b|"
+    r"^(and|also|what about|how much|how many|which one|where|when|why)\b",
+    flags=re.I,
+)
 STALE_REJECT_MIN_SURVIVORS = 5
 SEARCH_CONTEXT_HISTORY_MAX_CHARS = read_non_negative_int_env("SEARCH_CONTEXT_HISTORY_MAX_CHARS", "0")
+ROUTING_CONTEXT_MAX_CHARS = read_non_negative_int_env("ROUTING_CONTEXT_MAX_CHARS", "6000")
 TEXT_SIMILARITY_THRESHOLD = float(os.getenv("TEXT_SIMILARITY_THRESHOLD", "0.72"))
 TITLE_SIMILARITY_THRESHOLD = float(os.getenv("TITLE_SIMILARITY_THRESHOLD", "0.82"))
 STOPWORDS = {
@@ -229,7 +241,7 @@ def llm_model_label() -> str:
 
 def reload_openrouter_config() -> tuple[bool, tuple[str, ...], bool]:
     """Reload OpenRouter settings from .env without exposing the API key."""
-    global USE_OPENROUTER, OPENROUTER_API_KEY, OPENROUTER_API, OPENROUTER_MODEL_CHAIN, OR_DECIDER_MODEL, OR_SUMMARY_MODEL
+    global USE_OPENROUTER, OPENROUTER_API_KEY, OPENROUTER_API, OPENROUTER_MODEL_CHAIN, OR_DECIDER_MODEL, OR_PLANNER_MODEL, OR_SUMMARY_MODEL
     global OPENROUTER_HTTP_REFERER, OPENROUTER_X_TITLE
 
     try:
@@ -248,6 +260,7 @@ def reload_openrouter_config() -> tuple[bool, tuple[str, ...], bool]:
         if model.strip()
     )
     OR_DECIDER_MODEL = tuple(model.strip() for model in os.getenv("OR_DECIDER_MODEL", "").split(",") if model.strip())
+    OR_PLANNER_MODEL = tuple(model.strip() for model in os.getenv("OR_PLANNER_MODEL", "").split(",") if model.strip())
     OR_SUMMARY_MODEL = tuple(model.strip() for model in os.getenv("OR_SUMMARY_MODEL", "").split(",") if model.strip())
     OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
     OPENROUTER_X_TITLE = os.getenv("OPENROUTER_X_TITLE", "MisterSmartyPants").strip()
@@ -1730,6 +1743,68 @@ def format_decider_user_content(user_prompt: str) -> str:
     )
 
 
+def routing_context_messages(history: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return a bounded, dialogue-only suffix of history for routing models.
+
+    Search evidence is intentionally excluded: it is often large and can make a
+    short follow-up look like a request to research the prior results.
+    """
+    if ROUTING_CONTEXT_MAX_CHARS == 0:
+        return []
+
+    selected: list[dict[str, str]] = []
+    remaining = ROUTING_CONTEXT_MAX_CHARS
+    for message in reversed(history):
+        role = str(message.get("role") or "")
+        content = str(message.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        if len(content) > remaining:
+            content = content[-remaining:]
+        selected.append({"role": role, "content": content})
+        remaining -= len(content)
+        if remaining <= 0:
+            break
+    selected.reverse()
+    return selected
+
+
+def needs_contextual_query_rewrite(user_prompt: str, history: list[dict[str, str]]) -> bool:
+    """Whether a search query likely needs dialogue to resolve a reference."""
+    return bool(routing_context_messages(history) and CONTEXTUAL_QUERY_MARKERS.search(user_prompt.strip()))
+
+
+def plan_search_action(user_prompt: str, history: list[dict[str, str]]) -> tuple[bool, str, str | None]:
+    """Use a capable model to make one answer/search plan for a normal chat turn."""
+    messages = [{"role": "system", "content": expand_prompt_placeholders(PLANNER_SYSTEM_PROMPT)}]
+    messages.extend(routing_context_messages(history))
+    messages.append({"role": "user", "content": user_prompt})
+    try:
+        content = chat_once(
+            messages,
+            model=DECIDER_MODEL,
+            num_predict=96,
+            openrouter_model_chain=OR_PLANNER_MODEL or None,
+        ).strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.I).strip()
+        plan = json.loads(content)
+        if not isinstance(plan, dict) or set(plan) - {"action", "query"}:
+            raise ValueError("planner response must contain only action and optional query")
+        action = str(plan.get("action") or "").upper()
+        if action == "ANSWER" and "query" not in plan:
+            return False, "planner selected ANSWER", None
+        if action != "SEARCH":
+            raise ValueError("planner action must be ANSWER or SEARCH")
+        query = restore_user_quotes(user_prompt, validate_search_query(str(plan.get("query") or "")))
+        return True, "planner selected SEARCH", query
+    except Exception as exc:
+        # Forced-search rules run before this point.  For an ordinary turn, a
+        # failed planner should not turn a transient provider problem into an
+        # unavailable conversation.
+        return False, f"planner failed; answering directly: {exc}", None
+
+
 def decide_with_qwen(user_prompt: str, history: list[dict[str, str]]) -> tuple[bool, str, str | None]:
     global _last_qwen_scores
 
@@ -1744,6 +1819,7 @@ def decide_with_qwen(user_prompt: str, history: list[dict[str, str]]) -> tuple[b
             "content": expand_prompt_placeholders(QWEN_DECIDER_SYSTEM_PROMPT),
         }
     ]
+    messages.extend(routing_context_messages(history))
     messages.append({"role": "user", "content": format_decider_user_content(user_prompt)})
 
     if prompt_debug_enabled():
@@ -1823,6 +1899,8 @@ def decide_search_action(user_prompt: str, history: list[dict[str, str]]) -> tup
         raise ValueError("SEARCH_DECIDER=qwen is obsolete. Use SEARCH_DECIDER=python.")
     if SEARCH_DECIDER == "python":
         return decide_with_qwen(user_prompt, history)
+    if SEARCH_DECIDER == "planner":
+        return plan_search_action(user_prompt, history)
     if SEARCH_DECIDER != "ollama":
         raise ValueError(f"Unsupported SEARCH_DECIDER={SEARCH_DECIDER!r}")
 
@@ -1838,6 +1916,8 @@ def decide_with_configured_decider(user_prompt: str) -> tuple[bool, str, str | N
         raise ValueError("SEARCH_DECIDER=qwen is obsolete. Use SEARCH_DECIDER=python.")
     if SEARCH_DECIDER == "python":
         return decide_with_qwen(user_prompt, [])
+    if SEARCH_DECIDER == "planner":
+        return plan_search_action(user_prompt, [])
     if SEARCH_DECIDER == "ollama":
         should_search, reason = decide_search_needed(user_prompt, [])
         return should_search, reason, None
@@ -1924,15 +2004,16 @@ def is_real_source_url(url: str) -> bool:
     return True
 
 
-def derive_search_query(user_prompt: str) -> str:
+def derive_search_query(user_prompt: str, history: list[dict[str, str]] | None = None) -> str:
     messages = [
         {
             "role": "system",
             "content": expand_prompt_placeholders(QUERY_BUILDER_SYSTEM_PROMPT),
         }
     ]
+    messages.extend(routing_context_messages(history or []))
     messages.append({"role": "user", "content": user_prompt})
-    content = chat_once(messages, model=DECIDER_MODEL, num_predict=64, openrouter_model_chain=OR_DECIDER_MODEL)
+    content = chat_once(messages, model=DECIDER_MODEL, num_predict=64)
     validated = validate_search_query(content)
     restored = restore_user_quotes(user_prompt, validated)
     if prompt_debug_enabled():
@@ -1956,6 +2037,8 @@ def decide_search_needed(user_prompt: str, history: list[dict[str, str]]) -> tup
             ),
         }
     ]
+    messages.extend(routing_context_messages(history))
+    messages.append({"role": "user", "content": format_decider_user_content(user_prompt)})
     content = chat_once(
         messages,
         model=DECIDER_MODEL,
@@ -2379,14 +2462,17 @@ class ChatSession:
             global _last_qwen_scores
             _last_qwen_scores = None
             should_search = True
+            search_query = query
             print("[Search decider skipped; forced search mode]")
         else:
             marker = forced_search_marker(query)
-            will_run_decider = SEARCH_DECIDER in {"python", "ollama"} and marker is None
+            will_run_decider = SEARCH_DECIDER in {"python", "ollama", "planner"} and marker is None
             decider_start = time.perf_counter()
             should_search, decision_reason, search_query = decide_search_action(query, self.history)
             decider_ms = (time.perf_counter() - decider_start) * 1000
-            if will_run_decider:
+            if SEARCH_DECIDER == "planner" and marker is None:
+                print(f"[Search planner said {'SEARCH' if should_search else 'ANSWER'} in {decider_ms:.0f} ms]")
+            elif will_run_decider:
                 print(format_decider_elapsed(decider_ms, "SEARCH" if should_search else "ANSWER"))
             elif marker:
                 print(f"[Search decider skipped; forced search marker = {marker}]")
@@ -2415,18 +2501,24 @@ class ChatSession:
             self.history.append({"role": "assistant", "content": answer})
             return
 
-        query_builder_start = time.perf_counter()
-        try:
-            search_query = derive_search_query(query)
-        except Exception as exc:
-            query_builder_ms = (time.perf_counter() - query_builder_start) * 1000
-            print(f"[Query builder: {query_builder_ms:.0f} ms, failed]")
-            print("[Assistant]")
-            print(f"LLM query-builder failed: {exc}")
-            print()
-            return
-        query_builder_ms = (time.perf_counter() - query_builder_start) * 1000
-        print(f'[Query builder: {query_builder_ms:.0f} ms, "{search_query}"]')
+        if SEARCH_DECIDER == "planner":
+            search_query = search_query or query
+            print(f'[Search planner query: "{search_query}"]')
+        elif needs_contextual_query_rewrite(query, self.history):
+            query_builder_start = time.perf_counter()
+            try:
+                search_query = derive_search_query(query, self.history)
+            except Exception as exc:
+                query_builder_ms = (time.perf_counter() - query_builder_start) * 1000
+                search_query = query
+                print(f"[Query builder: {query_builder_ms:.0f} ms, failed; using user request]")
+                print(f"[Query builder fallback: {exc}]")
+            else:
+                query_builder_ms = (time.perf_counter() - query_builder_start) * 1000
+                print(f'[Query builder: {query_builder_ms:.0f} ms, "{search_query}"]')
+        else:
+            search_query = query
+            print("[Query builder skipped; standalone request]")
 
         search_start = time.perf_counter()
         try:

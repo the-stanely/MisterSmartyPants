@@ -31,6 +31,8 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 PASSKEYS_FILE = BASE_DIR / "passkeys.json"
 PASSKEY_CHALLENGE_SECONDS = 5 * 60
+SESSION_COOKIE_MAX_AGE_SECONDS = int(os.getenv("SESSION_COOKIE_MAX_AGE_SECONDS", str(30 * 24 * 60 * 60)))
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 sessions: dict[str, ChatSession] = {}
 session_locks: dict[str, threading.Lock] = {}
@@ -116,7 +118,16 @@ async def block_repeated_not_found(request: Request, call_next):
 def get_session(session_id: str | None, response: Response) -> tuple[str, ChatSession, threading.Lock]:
     if not session_id:
         session_id = uuid4().hex
-        response.set_cookie("msp_session", session_id, httponly=True, samesite="lax")
+    # Refresh expiry on activity and upgrade pre-existing session cookies to the
+    # persistent form after deployment.
+    response.set_cookie(
+        "msp_session",
+        session_id,
+        max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=SESSION_COOKIE_SECURE,
+    )
     with sessions_lock:
         session = sessions.get(session_id)
         if session is None:
@@ -125,6 +136,13 @@ def get_session(session_id: str | None, response: Response) -> tuple[str, ChatSe
             session_locks[session_id] = threading.Lock()
         session_lock = session_locks.setdefault(session_id, threading.Lock())
     return session_id, session, session_lock
+
+
+@app.get("/api/session")
+def session_status(response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, bool]:
+    _, session, session_lock = get_session(msp_session, response)
+    with session_lock:
+        return {"has_server_context": bool(session.history), "locked": session.locked}
 
 
 def base64url_encode(value: bytes) -> str:
