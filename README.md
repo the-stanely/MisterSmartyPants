@@ -311,6 +311,10 @@ The web input helper text shows the current state as `Search is ON/OFF/FORCED. A
 
 The web UI starts in concise mode, showing only `You` and `Mr. Smarty Pants` final answers. Use `/verbose-on` to restore the search, model, and pipeline details; `/verbose-off` returns to concise mode.
 
+Each completed non-system reply also has a **Copy formatted** button. It writes both a light-themed HTML representation (black text on white) and matching plain text to the clipboard. Desktop Google Docs normally uses the rich HTML representation; Android browsers may provide only the compatible plain-text clipboard entry. This preserves common formatting such as headings, emphasis, lists, links, and code blocks where rich clipboard support is available.
+
+The adjacent **Share HTML** button creates a light-themed standalone HTML file and opens the device share sheet. On Android, choose Google Drive to upload the file to the selected Google account and folder. In Drive, use **More** → **Open with** → **Google Docs** on that HTML file to import and edit it with its formatting and mobile word wrapping intact. Drive retains the uploaded HTML file; its upload timestamp distinguishes repeated exports. Google Docs for Android supports importing and editing HTML files.
+
 `/search <query>` is a strict search-engine mode: it bypasses the planner/decider and all LLM calls. It uses DDGS result metadata and fast meta-description enrichment (no full page extraction), ranks results with the metadata relevance ranker, and returns the top `SEARCH_ONLY_TOP_N` links with summaries.
 
 `/search-force` switches the session into forced search mode. Subsequent normal prompts use the full search-backed answer pipeline and skip only the planner/decider; DDGS search, fetch/extraction, ranking, optional summarization, final answer generation, source-link appending, and history updates still run. Use `/search-on` to return to planner/decider-controlled search, or `/search-off` to answer from memory and prior context.

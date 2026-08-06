@@ -55,6 +55,8 @@
     button:disabled { opacity: .55; cursor: wait; }
     .passkey-controls { display: flex; gap: 8px; padding: 0 18px 12px; }
     .passkey-controls button { min-height: 36px; padding: 0 10px; background: #334155; font-size: 13px; }
+    .reply-controls { display: flex; gap: 8px; margin-top: 8px; }
+    .reply-controls button { min-height: 32px; padding: 0 10px; background: #1f6f43; font-size: 12px; }
     #restore-notice { margin: 12px 18px 0; padding: 10px; border: 1px solid #7c5c19; border-radius: 6px; background: #33280d; color: #fde68a; font-size: 13px; }
   </style>
 </head>
@@ -164,7 +166,12 @@
       block.className = 'turn';
       const userLabel = verboseMode ? 'AI ready&gt;' : 'You&gt;';
       const assistantLabel = verboseMode ? '' : '<div class="speaker">Mr. Smarty Pants&gt;</div>';
-      block.innerHTML = `<div class="user">${userLabel} ${escapeHtml(displayInput(input))}</div>${assistantLabel}<div class="output">${renderOutputHtml(output)}</div><div class="status"></div>`;
+      const copyable = isCopyableReply(output);
+      block.innerHTML = `<div class="user">${userLabel} ${escapeHtml(displayInput(input))}</div>${assistantLabel}<div class="output">${renderOutputHtml(output)}</div><div class="reply-controls" ${copyable ? '' : 'hidden'}><button class="copy-formatted" type="button" ${copyable ? '' : 'disabled'}>Copy formatted</button><button class="share-html" type="button" ${copyable ? '' : 'disabled'}>Share HTML</button></div><div class="status"></div>`;
+      const copyButton = block.querySelector('.copy-formatted');
+      copyButton.addEventListener('click', () => copyFormattedReply(block, copyButton));
+      const shareButton = block.querySelector('.share-html');
+      shareButton.addEventListener('click', () => shareHtmlReply(block, shareButton));
       log.appendChild(block);
       if (persist) {
         transcript.push({input: displayInput(input), output: output || ''});
@@ -177,6 +184,85 @@
       if (!transcript.length) return;
       transcript[transcript.length - 1].output = output || '';
       saveTranscript();
+    }
+
+    function isCopyableReply(output) {
+      return Boolean(output && !output.startsWith('[System]'));
+    }
+
+    function updateCopyControl(turn, output, complete = false) {
+      const controls = turn.querySelector('.reply-controls');
+      const button = turn.querySelector('.copy-formatted');
+      const shareButton = turn.querySelector('.share-html');
+      if (!controls || !button || !shareButton) return;
+      const copyable = isCopyableReply(output);
+      controls.hidden = !copyable;
+      button.disabled = !copyable || !complete;
+      shareButton.disabled = !copyable || !complete;
+    }
+
+    function lightReplyHtml(replyHtml) {
+      return `<div style="background:#ffffff;color:#111111;font-family:Arial,sans-serif;line-height:1.45"><style>code{background:#f3f4f6;color:#111111;padding:2px 4px;border-radius:3px}pre{background:#f3f4f6;color:#111111;padding:10px;border:1px solid #d1d5db}a{color:#1155cc}table{border-collapse:collapse}th,td{border:1px solid #9ca3af;padding:5px;color:#111111}th{background:#e5e7eb}</style>${replyHtml}</div>`;
+    }
+
+    async function copyFormattedReply(turn, button) {
+      const output = turn.querySelector('.output');
+      const replyHtml = output?.innerHTML || '';
+      const plainText = output?.innerText || '';
+      if (!replyHtml) return;
+      const html = lightReplyHtml(replyHtml);
+      button.disabled = true;
+      try {
+        if (navigator.clipboard?.write && window.ClipboardItem) {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              'text/html': new Blob([html], {type: 'text/html'}),
+              'text/plain': new Blob([plainText], {type: 'text/plain'}),
+            })
+          ]);
+        } else {
+          const staging = document.createElement('div');
+          staging.contentEditable = 'true';
+          staging.innerHTML = html;
+          staging.style.cssText = 'position:fixed;left:-9999px;top:0;';
+          document.body.appendChild(staging);
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(staging);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          const copied = document.execCommand('copy');
+          selection.removeAllRanges();
+          staging.remove();
+          if (!copied) throw new Error('This browser cannot copy formatted content.');
+        }
+        button.textContent = 'Copied formatted';
+        setTimeout(() => { button.textContent = 'Copy formatted'; button.disabled = false; }, 1600);
+      } catch (err) {
+        button.textContent = 'Copy formatted';
+        button.disabled = false;
+        window.alert(`Formatted copy failed: ${err.message || err}`);
+      }
+    }
+
+    async function shareHtmlReply(turn, button) {
+      const output = turn.querySelector('.output');
+      const replyHtml = output?.innerHTML || '';
+      if (!replyHtml) return;
+      const documentHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Mr. Smarty Pants reply</title></head><body>${lightReplyHtml(replyHtml)}</body></html>`;
+      const file = new File([documentHtml], 'mister-smartypants-reply.html', {type: 'text/html'});
+      if (!navigator.share || !navigator.canShare?.({files: [file]})) {
+        window.alert('Sharing HTML files is not supported by this browser.');
+        return;
+      }
+      button.disabled = true;
+      try {
+        await navigator.share({title: 'Mr. Smarty Pants reply', files: [file]});
+      } catch (err) {
+        if (err.name !== 'AbortError') window.alert(`Share failed: ${err.message || err}`);
+      } finally {
+        button.disabled = false;
+      }
     }
 
     function clearTranscript() {
@@ -390,6 +476,7 @@
         if (started.done || !started.job_id) {
           current.innerHTML = renderOutputHtml(started.output || '');
           updateLatestTranscript(started.output || '');
+          updateCopyControl(turn, started.output || '', true);
           updateSearchModeFromResponse(lowerText, started.output);
           updateVerboseModeFromResponse(lowerText, started.output);
           statusLine.textContent = '';
@@ -420,6 +507,7 @@
           if (data.done) {
             current.innerHTML = renderOutputHtml(data.output || '');
             updateLatestTranscript(data.output || '');
+            updateCopyControl(turn, data.output || '', true);
             updateSearchModeFromResponse(lowerText, data.output);
             updateVerboseModeFromResponse(lowerText, data.output);
             statusLine.textContent = '';
