@@ -208,6 +208,21 @@ def favicon() -> FileResponse:
     return FileResponse(STATIC_DIR / "favicon.ico")
 
 
+@app.get("/manifest.webmanifest")
+def web_app_manifest() -> FileResponse:
+    return FileResponse(STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json")
+
+
+@app.get("/icon-192.png")
+def icon_192() -> FileResponse:
+    return FileResponse(STATIC_DIR / "icon-192.png", media_type="image/png")
+
+
+@app.get("/icon-512-maskable.png")
+def icon_512_maskable() -> FileResponse:
+    return FileResponse(STATIC_DIR / "icon-512-maskable.png", media_type="image/png")
+
+
 @app.get("/robots.txt")
 def robots() -> FileResponse:
     return FileResponse(STATIC_DIR / "robots.txt", media_type="text/plain")

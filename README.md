@@ -367,9 +367,25 @@ Public static/crawler endpoints:
 
 ```text
 GET /favicon.ico
+GET /manifest.webmanifest
+GET /icon-192.png
+GET /icon-512-maskable.png
 GET /robots.txt
 GET /sitemap.xml
 ```
+
+### Favicon and Android home-screen shortcut
+
+`static/favicon.ico` is the browser favicon and contains multiple icon sizes. The Android home-screen metadata is in `static/manifest.webmanifest`; it uses these PNG assets:
+
+```text
+static/icon-192.png              Standard 192 × 192 app icon
+static/icon-512-maskable.png     512 × 512 Android maskable app icon
+```
+
+The manifest is linked from `static/index.html`, requests standalone display, and sets the app's dark theme/background color. On Android Chrome, visit the HTTPS site, then use Chrome's menu to choose **Install app** or **Add to Home screen** (the exact wording varies by Chrome version). The resulting shortcut uses the manifest name and Android icon rather than relying only on the browser favicon.
+
+To replace the artwork, update the ICO and regenerate both PNG variants from the same source. Keep the maskable icon's full square background intact; Android may crop maskable icons into a circle or rounded shape. Restart the server after changing `server.py`; manifest or icon file changes are served from `static/`, though browser or CDN caching may require a hard refresh or a short wait before the updated asset appears.
 
 The crawler files live in `static/robots.txt` and `static/sitemap.xml`. Update the sitemap URL if you host the demo on a different domain.
 
