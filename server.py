@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from fastapi import Cookie, FastAPI, HTTPException, Request, Response, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from fido2.server import Fido2Server
 from fido2.webauthn import (
@@ -39,6 +39,7 @@ session_locks: dict[str, threading.Lock] = {}
 sessions_lock = threading.Lock()
 jobs: dict[str, dict[str, object]] = {}
 jobs_lock = threading.Lock()
+jobs_condition = threading.Condition(jobs_lock)
 preload_lock = threading.Lock()
 not_found_lock = threading.Lock()
 not_found_streaks: dict[str, int] = {}
@@ -380,13 +381,14 @@ def run_chat_job(job_id: str, session: ChatSession, session_lock: threading.Lock
             buffer.write(f"[Server error] {type(exc).__name__}: {exc}\n")
             error = str(exc)
 
-    with jobs_lock:
+    with jobs_condition:
         job = jobs.get(job_id)
         if job is not None:
             job["done"] = True
             output = buffer.getvalue()
             job["output"] = output if session.verbose_output else concise_output(output)
             job["error"] = error
+            jobs_condition.notify_all()
 
 @app.post("/api/chat")
 def chat(req: ChatRequest, response: Response, msp_session: str | None = Cookie(default=None)) -> dict[str, object]:
@@ -414,3 +416,39 @@ def chat_status(job_id: str, msp_session: str | None = Cookie(default=None)) -> 
         if job is None or job.get("session_id") != msp_session:
             return JSONResponse({"error": "Job not found"}, status_code=status.HTTP_404_NOT_FOUND)
         return JSONResponse({"done": job["done"], "output": job["output"], "error": job["error"]})
+
+
+@app.get("/api/chat/{job_id}/events")
+def chat_events(job_id: str, msp_session: str | None = Cookie(default=None)) -> StreamingResponse:
+    """Notify the browser when a background chat job completes.
+
+    A comment every 20 seconds prevents an otherwise quiet SSE response from
+    exceeding a reverse proxy's origin-read timeout while the job is running.
+    """
+    with jobs_condition:
+        job = jobs.get(job_id)
+        if not msp_session or job is None or job.get("session_id") != msp_session:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    def event_stream():
+        yield "retry: 3000\n\n"
+        while True:
+            with jobs_condition:
+                job = jobs.get(job_id)
+                if job is None or job.get("session_id") != msp_session:
+                    return
+                if job["done"]:
+                    payload = json.dumps({"output": job["output"], "error": job["error"]})
+                else:
+                    jobs_condition.wait(timeout=20)
+                    payload = None
+            if payload is not None:
+                yield f"event: complete\ndata: {payload}\n\n"
+                return
+            yield ": keep-alive\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

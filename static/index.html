@@ -333,8 +333,73 @@
       return container.innerHTML;
     }
 
-    function sleep(ms) {
-      return new Promise(resolve => setTimeout(resolve, ms));
+    function waitForChatJob(jobId, onUpdate, onWorking) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let pollInFlight = false;
+        let lastRecoveryPoll = 0;
+        const eventSource = new EventSource(`/api/chat/${encodeURIComponent(jobId)}/events`);
+
+        const cleanup = () => {
+          settled = true;
+          eventSource.close();
+          clearInterval(fallbackPollTimer);
+          clearInterval(workingTimer);
+          window.removeEventListener('online', recoverNow);
+        };
+        const complete = data => {
+          if (settled) return;
+          cleanup();
+          resolve(data);
+        };
+        const fail = error => {
+          if (settled) return;
+          cleanup();
+          reject(error);
+        };
+        const processStatus = (response, data) => {
+          if (!response.ok || data.error) {
+            if (response.status === 404) fail(new Error(data.error || 'Chat job not found.'));
+            return;
+          }
+          if (data.output) onUpdate(data.output);
+          if (data.done) complete(data);
+        };
+        const poll = async () => {
+          if (settled || pollInFlight) return;
+          pollInFlight = true;
+          try {
+            const response = await fetch(`/api/chat/${encodeURIComponent(jobId)}`);
+            processStatus(response, await readJsonResponse(response));
+          } catch (_) {
+            // SSE will reconnect automatically; leave the long fallback timer running.
+          } finally {
+            pollInFlight = false;
+          }
+        };
+        const recoverNow = () => {
+          const now = Date.now();
+          if (now - lastRecoveryPoll < 1000) return;
+          lastRecoveryPoll = now;
+          void poll();
+        };
+        const fallbackPollTimer = setInterval(() => { void poll(); }, 60000);
+        let workingDots = 0;
+        const workingTimer = setInterval(() => {
+          workingDots = (workingDots + 1) % 4;
+          onWorking(workingDots);
+        }, 1000);
+
+        eventSource.addEventListener('complete', event => {
+          try {
+            complete(JSON.parse(event.data));
+          } catch (_) {
+            fail(new Error('Received an invalid chat completion event.'));
+          }
+        });
+        eventSource.onerror = recoverNow;
+        window.addEventListener('online', recoverNow);
+      });
     }
 
     function scrollToBottom(force = false) {
@@ -486,37 +551,26 @@
           return;
         }
 
-        let pollCount = 0;
-        while (true) {
-          await sleep(1000);
-          pollCount += 1;
-          statusLine.textContent = `[working${'.'.repeat(pollCount % 4)}]`;
-          scrollToBottom();
-          const pollRes = await fetch(`/api/chat/${encodeURIComponent(started.job_id)}`);
-          const data = await readJsonResponse(pollRes);
-          if (!pollRes.ok || data.error) {
-            current.innerHTML = renderOutputHtml(data.output || data.error || `HTTP ${pollRes.status}`);
-            updateLatestTranscript(data.output || data.error || `HTTP ${pollRes.status}`);
-            statusLine.textContent = '';
+        const data = await waitForChatJob(
+          started.job_id,
+          output => {
+            current.innerHTML = renderOutputHtml(output);
+            updateLatestTranscript(output);
             scrollToBottom();
-            return;
-          }
-          if (data.output) {
-            current.innerHTML = renderOutputHtml(data.output);
-            updateLatestTranscript(data.output);
+          },
+          dots => {
+            statusLine.textContent = `[working${'.'.repeat(dots)}]`;
             scrollToBottom();
-          }
-          if (data.done) {
-            current.innerHTML = renderOutputHtml(data.output || '');
-            updateLatestTranscript(data.output || '');
-            updateCopyControl(turn, data.output || '', true);
-            updateSearchModeFromResponse(lowerText, data.output);
-            updateVerboseModeFromResponse(lowerText, data.output);
-            statusLine.textContent = '';
-            scrollToBottom();
-            return;
-          }
-        }
+          },
+        );
+        if (data.error) throw new Error(data.error);
+        current.innerHTML = renderOutputHtml(data.output || '');
+        updateLatestTranscript(data.output || '');
+        updateCopyControl(turn, data.output || '', true);
+        updateSearchModeFromResponse(lowerText, data.output);
+        updateVerboseModeFromResponse(lowerText, data.output);
+        statusLine.textContent = '';
+        scrollToBottom();
       } catch (err) {
         current.innerHTML = renderOutputHtml(String(err));
         updateLatestTranscript(String(err));

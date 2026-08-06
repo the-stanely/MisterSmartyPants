@@ -360,6 +360,7 @@ GET  /api/health
 GET  /api/session        Check whether this browser still has server conversation context
 POST /api/chat           Start a chat job
 GET  /api/chat/{job_id}  Poll a chat job until it is done
+GET  /api/chat/{job_id}/events  Receive the chat completion through Server-Sent Events
 POST /api/new
 ```
 
@@ -389,7 +390,7 @@ To replace the artwork, update the ICO and regenerate both PNG variants from the
 
 The crawler files live in `static/robots.txt` and `static/sitemap.xml`. Update the sitemap URL if you host the demo on a different domain.
 
-The server uses a renewed persistent `msp_session` cookie. Each browser session gets its own in-memory `ChatSession`, including history and slash-command state. The browser also restores up to 100 recent turns from device-local storage after a reload. If the server no longer has the matching chat context—for example after a server restart—the UI labels those restored turns as review-only rather than implying they will affect the next answer. Chat requests run as background jobs so reverse proxies and Cloudflare do not have to hold one long request open. The browser polls job status and shows a changing `[working...]` indicator while the job runs.
+The server uses a renewed persistent `msp_session` cookie. Each browser session gets its own in-memory `ChatSession`, including history and slash-command state. The browser also restores up to 100 recent turns from device-local storage after a reload. If the server no longer has the matching chat context—for example after a server restart—the UI labels those restored turns as review-only rather than implying they will affect the next answer. Chat requests run as background jobs so reverse proxies and Cloudflare do not have to hold one long request open. The browser receives the completion through Server-Sent Events (SSE); the quiet SSE stream sends a 20-second heartbeat while work is underway. A 60-second status poll is retained as a fallback, with an immediate poll when SSE errors or the browser regains network connectivity. The UI continues to show a changing `[working...]` indicator locally while the job runs.
 
 The server also has a small in-memory bot guard: if one client IP receives 3 consecutive 404 responses, that IP is blocked for 10 minutes. Behind Cloudflare, the server uses `CF-Connecting-IP`; behind other proxies it falls back to the first `X-Forwarded-For` value, then the socket IP. HTTP request logs are timestamped, and block start/deny/expiry events are logged explicitly.
 
