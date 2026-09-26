@@ -141,10 +141,13 @@ OLLAMA_API=http://localhost:11434/api/chat
 OLLAMA_MODEL=llama3.2:latest
 OLLAMA_TIMEOUT_SECONDS=1200
 OLLAMA_NUM_PREDICT=2048
+OLLAMA_REQUEST_KEEP_ALIVE=-1m
 OLLAMA_NUM_THREAD=
 ```
 
 `OLLAMA_NUM_PREDICT` is the maximum generated-token budget for normal Ollama answers. Lowering it can speed up final responses if your model tends to produce long answers. Try `1024` or `2048` if speed matters more than long-form output. Ollama-based article summaries use `DECIDER_SUMMARY_MAX_TOKENS` instead.
+
+`OLLAMA_REQUEST_KEEP_ALIVE` is sent with every native Ollama request. The default `-1m` keeps the model resident until Ollama is stopped or it is explicitly unloaded; use a positive duration such as `30m` to permit unloading after inactivity.
 
 ### OpenRouter final-answer provider
 

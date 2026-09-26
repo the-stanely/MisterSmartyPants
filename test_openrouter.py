@@ -26,7 +26,7 @@ class OpenRouterChatTests(unittest.TestCase):
             {"role": "user", "content": "Help me choose business casual clothes."},
             {"role": "assistant", "content": "A long-sleeve oxford is a classic choice."},
         ]
-        with patch("websearchMCP.chat_once", return_value="YES") as chat:
+        with patch("websearchMCP.chat_once", return_value="ANSWER") as chat:
             should_search, _ = websearchMCP.decide_search_needed(
                 "Would that work with chinos?", history
             )
@@ -35,6 +35,14 @@ class OpenRouterChatTests(unittest.TestCase):
         messages = chat.call_args.args[0]
         self.assertEqual(messages[1:3], history)
         self.assertIn("Would that work with chinos?", messages[-1]["content"])
+        self.assertFalse(chat.call_args.kwargs["think"])
+
+    def test_ollama_decider_accepts_search_label(self) -> None:
+        with patch("websearchMCP.chat_once", return_value="SEARCH"):
+            should_search, reason = websearchMCP.decide_search_needed("What is the weather today?", [])
+
+        self.assertTrue(should_search)
+        self.assertIn("answered SEARCH", reason)
 
     def test_planner_returns_a_contextual_search_query(self) -> None:
         history = [{"role": "assistant", "content": "We are discussing a Framework Laptop 16."}]
@@ -153,6 +161,10 @@ class OpenRouterChatTests(unittest.TestCase):
 
         self.assertEqual(answer, "Ollama answer")
         self.assertEqual(post.call_args.args[0], websearchMCP.OLLAMA_API)
+        self.assertEqual(
+            post.call_args.kwargs["json"]["keep_alive"],
+            websearchMCP.OLLAMA_REQUEST_KEEP_ALIVE,
+        )
 
     def test_uses_a_dedicated_openrouter_chain_when_provided(self) -> None:
         response = Mock()

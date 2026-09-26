@@ -48,6 +48,7 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
 OLLAMA_TOP_P = float(os.getenv("OLLAMA_TOP_P", "0.9"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
+OLLAMA_REQUEST_KEEP_ALIVE = os.getenv("OLLAMA_REQUEST_KEEP_ALIVE", "-1m").strip() or "-1m"
 OLLAMA_NUM_THREAD_RAW = os.getenv("OLLAMA_NUM_THREAD", "").strip()
 OLLAMA_NUM_THREAD = int(OLLAMA_NUM_THREAD_RAW) if OLLAMA_NUM_THREAD_RAW else None
 USE_OPENROUTER = os.getenv("USE_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -1438,6 +1439,7 @@ def chat_once(
     model: str = OLLAMA_MODEL,
     num_predict: int | None = None,
     openrouter_model_chain: tuple[str, ...] | None = None,
+    think: bool | None = None,
 ) -> str:
     serialized_messages = validate_llm_messages(messages)
     selected_openrouter_chain = openrouter_model_chain or OPENROUTER_MODEL_CHAIN
@@ -1461,8 +1463,11 @@ def chat_once(
         "model": model,
         "messages": messages,
         "stream": False,
+        "keep_alive": OLLAMA_REQUEST_KEEP_ALIVE,
         "options": options,
     }
+    if think is not None:
+        payload["think"] = think
     LLM_MODEL_CONTEXT.set(model)
     response = requests.post(OLLAMA_API, json=payload, timeout=OLLAMA_TIMEOUT_SECONDS)
     response.raise_for_status()
@@ -2044,14 +2049,18 @@ def decide_search_needed(user_prompt: str, history: list[dict[str, str]]) -> tup
         model=DECIDER_MODEL,
         num_predict=64,
         openrouter_model_chain=OR_DECIDER_MODEL,
+        think=False,
     ).strip()
-    label_match = re.search(r"\b(YES|NO)\b", content, flags=re.I)
+    label_match = re.search(r"\b(SEARCH|ANSWER)\b", content, flags=re.I)
     if not label_match:
-        raise ValueError(f"Ollama search decider returned unexpected text: {content!r}; expected YES or NO.")
+        raise ValueError(
+            f"Ollama search decider returned unexpected text: {content!r}; "
+            "expected SEARCH or ANSWER."
+        )
     label = label_match.group(1).upper()
-    if label == "YES":
-        return False, f"ollama decider answered YES: {content}"
-    return True, f"ollama decider answered NO: {content}"
+    if label == "SEARCH":
+        return True, f"ollama decider answered SEARCH: {content}"
+    return False, f"ollama decider answered ANSWER: {content}"
 
 
 def parse_search_data_for_prompt(tool_json: str) -> dict[str, Any]:
