@@ -7,6 +7,7 @@ from datetime import datetime
 import hashlib
 import html as html_module
 import json
+import logging
 import os
 import re
 import sys
@@ -28,6 +29,15 @@ except Exception:
 
 from api_adapters import route_to_api_adapter
 
+_ddgs_logger = logging.getLogger("ddgs.ddgs")
+_ddgs_logger.setLevel(logging.INFO)
+_ddgs_logger.propagate = False
+if not any(handler.get_name() == "msp-ddgs-terminal" for handler in _ddgs_logger.handlers):
+    _ddgs_handler = logging.StreamHandler()
+    _ddgs_handler.set_name("msp-ddgs-terminal")
+    _ddgs_handler.setFormatter(logging.Formatter("%(asctime)s [DDGS %(levelname)s] %(message)s"))
+    _ddgs_logger.addHandler(_ddgs_handler)
+
 
 def read_positive_int_env(name: str, default: str) -> int:
     value = int(os.getenv(name, default))
@@ -48,7 +58,6 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
 OLLAMA_TOP_P = float(os.getenv("OLLAMA_TOP_P", "0.9"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
-OLLAMA_REQUEST_KEEP_ALIVE = os.getenv("OLLAMA_REQUEST_KEEP_ALIVE", "-1m").strip() or "-1m"
 OLLAMA_NUM_THREAD_RAW = os.getenv("OLLAMA_NUM_THREAD", "").strip()
 OLLAMA_NUM_THREAD = int(OLLAMA_NUM_THREAD_RAW) if OLLAMA_NUM_THREAD_RAW else None
 USE_OPENROUTER = os.getenv("USE_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -117,11 +126,14 @@ REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
 DDGS_TIMEOUT_SECONDS = int(os.getenv("DDGS_TIMEOUT_SECONDS", "20"))
 DDGS_TEXT_BACKEND = os.getenv("DDGS_TEXT_BACKEND", "auto").strip() or "auto"
 DDGS_NEWS_BACKEND = os.getenv("DDGS_NEWS_BACKEND", "auto").strip() or "auto"
+DDGS_SEARCH_RETRY_DELAY_SECONDS = 0.75
 DDGS_REGION = os.getenv("DDGS_REGION", "us-en").strip() or "us-en"
 DDGS_SAFESEARCH = os.getenv("DDGS_SAFESEARCH", "moderate").strip() or "moderate"
 DDGS_TIMELIMIT_RAW = os.getenv("DDGS_TIMELIMIT", "").strip()
 DDGS_TIMELIMIT = DDGS_TIMELIMIT_RAW or None
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "").strip()
+SERPAPI_URL = "https://serpapi.com/search.json"
 DEBUG = False
 
 PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
@@ -1147,40 +1159,110 @@ def print_ddgs_call_debug(query: str, raw_with_modes: list[tuple[str, dict[str, 
 
 
 def collect_ddgs_results(query: str, text_backend: str, news_backend: str) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
-    raw_with_modes: list[tuple[str, dict[str, Any]]] = []
-    mode_errors: list[str] = []
-    with DDGS(timeout=DDGS_TIMEOUT_SECONDS) as ddgs:
-        if "news" in SEARCH_MODES:
-            try:
-                raw_with_modes.extend(
-                    ("news", row)
-                    for row in ddgs.news(
-                        query,
-                        max_results=SEARCH_NEWS_LIMIT,
-                        backend=news_backend,
-                        region=DDGS_REGION,
-                        safesearch=DDGS_SAFESEARCH,
-                        timelimit=DDGS_TIMELIMIT,
+    for attempt in range(2):
+        raw_with_modes: list[tuple[str, dict[str, Any]]] = []
+        mode_errors: list[str] = []
+        with DDGS(timeout=DDGS_TIMEOUT_SECONDS) as ddgs:
+            if "news" in SEARCH_MODES:
+                try:
+                    raw_with_modes.extend(
+                        ("news", row)
+                        for row in ddgs.news(
+                            query,
+                            max_results=SEARCH_NEWS_LIMIT,
+                            backend=news_backend,
+                            region=DDGS_REGION,
+                            safesearch=DDGS_SAFESEARCH,
+                            timelimit=DDGS_TIMELIMIT,
+                        )
                     )
-                )
-            except Exception as exc:
-                mode_errors.append(f"news({news_backend}): {exc}")
-        if "text" in SEARCH_MODES:
-            try:
-                raw_with_modes.extend(
-                    ("text", row)
-                    for row in ddgs.text(
-                        query,
-                        max_results=SEARCH_TEXT_LIMIT,
-                        backend=text_backend,
-                        region=DDGS_REGION,
-                        safesearch=DDGS_SAFESEARCH,
-                        timelimit=DDGS_TIMELIMIT,
+                except Exception as exc:
+                    mode_errors.append(f"news({news_backend}): {exc}")
+            if "text" in SEARCH_MODES:
+                try:
+                    raw_with_modes.extend(
+                        ("text", row)
+                        for row in ddgs.text(
+                            query,
+                            max_results=SEARCH_TEXT_LIMIT,
+                            backend=text_backend,
+                            region=DDGS_REGION,
+                            safesearch=DDGS_SAFESEARCH,
+                            timelimit=DDGS_TIMELIMIT,
+                        )
                     )
-                )
-            except Exception as exc:
-                mode_errors.append(f"text({text_backend}): {exc}")
+                except Exception as exc:
+                    mode_errors.append(f"text({text_backend}): {exc}")
+
+        if raw_with_modes:
+            if attempt:
+                print("[DDGS retry recovered search results]")
+            return raw_with_modes, mode_errors
+        if attempt == 0:
+            print("[DDGS returned no results; retrying once]")
+            time.sleep(DDGS_SEARCH_RETRY_DELAY_SECONDS)
+
     return raw_with_modes, mode_errors
+
+
+def collect_serpapi_results(query: str, max_results: int) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
+    if not SERPAPI_KEY:
+        return [], ["SERPAPI_KEY is not configured."]
+
+    region_parts = DDGS_REGION.split("-", 1)
+    params = {
+        "engine": "google",
+        "q": query,
+        "api_key": SERPAPI_KEY,
+        "num": min(100, max(1, max_results)),
+    }
+    if region_parts[0]:
+        params["gl"] = region_parts[0]
+    if len(region_parts) > 1 and region_parts[1]:
+        params["hl"] = region_parts[1]
+
+    try:
+        response = requests.get(SERPAPI_URL, params=params, timeout=DDGS_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.Timeout:
+        return [], [f"request timed out after {DDGS_TIMEOUT_SECONDS}s"]
+    except requests.RequestException as exc:
+        status_code = getattr(exc.response, "status_code", None) if exc.response is not None else None
+        status_detail = f", HTTP {status_code}" if status_code else ""
+        return [], [f"request failed ({type(exc).__name__}{status_detail})"]
+    except ValueError:
+        return [], ["response was not valid JSON"]
+
+    if not isinstance(payload, dict):
+        return [], ["response was not a JSON object"]
+    if payload.get("error"):
+        error_detail = str(payload["error"]).replace(SERPAPI_KEY, "[redacted]")
+        return [], [f"API error: {error_detail[:300]}"]
+
+    raw_with_modes: list[tuple[str, dict[str, Any]]] = []
+    for mode, field in (("text", "organic_results"), ("news", "news_results")):
+        rows = payload.get(field, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_with_modes.append(
+                (
+                    mode,
+                    {
+                        "title": row.get("title", ""),
+                        "href": row.get("link", ""),
+                        "body": row.get("snippet", ""),
+                        "date": row.get("date", ""),
+                    },
+                )
+            )
+
+    if not raw_with_modes:
+        return [], ["returned no organic or news results"]
+    return raw_with_modes, []
 
 
 def print_fetch_debug_detail(
@@ -1234,20 +1316,44 @@ def print_final_rank_debug(pages: list[dict[str, str]]) -> None:
         print(f"Content chars: {page.get('content_chars', '')}")
         print()
 
-def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit: int, fetch_max_chars: int) -> str:
+def run_search(
+    query: str,
+    search_limit: int,
+    fetch_top_n: int,
+    fetch_scan_limit: int,
+    fetch_max_chars: int,
+    _search_provider: str = "ddgs",
+) -> str:
     # Normalize query format for DDGS compatibility
     query = normalize_query_for_ddgs(query)
-    if prompt_debug_enabled():
-        print(f"[DDGS search with query: {query!r}]")
-    raw_with_modes, mode_errors = collect_ddgs_results(query, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND)
-    if prompt_debug_enabled():
-        print_ddgs_call_debug(query, raw_with_modes)
-    if prompt_debug_enabled():
-        print_raw_ddgs_debug(raw_with_modes)
+    if _search_provider == "serpapi":
+        print("[Search provider: SerpAPI fallback]")
+        raw_with_modes, mode_errors = collect_serpapi_results(
+            query,
+            max(search_limit, SEARCH_TEXT_LIMIT, SEARCH_NEWS_LIMIT),
+        )
+    else:
+        if prompt_debug_enabled():
+            print(f"[DDGS search with query: {query!r}]")
+        raw_with_modes, mode_errors = collect_ddgs_results(query, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND)
+        if prompt_debug_enabled():
+            print_ddgs_call_debug(query, raw_with_modes)
+            print_raw_ddgs_debug(raw_with_modes)
 
     if not raw_with_modes:
         detail = "; ".join(mode_errors) if mode_errors else "No results found."
-        raise RuntimeError(f"Search failed: {detail}")
+        if _search_provider == "ddgs" and SERPAPI_KEY:
+            print("[Search fallback: DDGS returned no candidates; trying SerpAPI]")
+            raw_with_modes, mode_errors = collect_serpapi_results(
+                query,
+                max(search_limit, SEARCH_TEXT_LIMIT, SEARCH_NEWS_LIMIT),
+            )
+            _search_provider = "serpapi"
+            if not raw_with_modes:
+                fallback_detail = "; ".join(mode_errors) if mode_errors else "No results found."
+                raise RuntimeError(f"DDGS search failed: {detail}; SerpAPI fallback failed: {fallback_detail}")
+        else:
+            raise RuntimeError(f"{_search_provider} search failed: {detail}")
 
     search_items: list[dict[str, str]] = []
     seen_urls: set[str] = set()
@@ -1286,7 +1392,17 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
             search_items.append(item)
 
     if not search_items:
-        raise RuntimeError("Search produced no usable URL candidates.")
+        if _search_provider == "ddgs" and SERPAPI_KEY:
+            print("[Search fallback: DDGS returned no usable URLs; trying SerpAPI]")
+            return run_search(
+                query,
+                search_limit,
+                fetch_top_n,
+                fetch_scan_limit,
+                fetch_max_chars,
+                _search_provider="serpapi",
+            )
+        raise RuntimeError(f"{_search_provider} produced no usable URL candidates.")
 
     if prompt_debug_enabled():
         print_search_candidate_debug("Deduped DDGS candidates before rank", search_items)
@@ -1357,6 +1473,24 @@ def run_search(query: str, search_limit: int, fetch_top_n: int, fetch_scan_limit
     ranked_pages = score_fetched_pages(query, fetched_survivors)
     fetched_pages = ranked_pages[:fetch_top_n]
     print(f"[Fetch rank: {len(fetched_survivors)} survivors -> {len(fetched_pages)} sources]")
+    if not fetched_pages and fetch_debug:
+        print("[Fetch diagnostics: no usable sources]")
+        for item in fetch_debug:
+            print(
+                f"[Fetch rejected: {item.get('status', 'unknown')} "
+                f"{item.get('ms', '?')} ms] {item.get('url', '')} "
+                f"({item.get('reason', 'unknown reason')})"
+            )
+    if not fetched_pages and _search_provider == "ddgs" and SERPAPI_KEY:
+        print("[Search fallback: DDGS candidates yielded no usable sources; trying SerpAPI]")
+        return run_search(
+            query,
+            search_limit,
+            fetch_top_n,
+            fetch_scan_limit,
+            fetch_max_chars,
+            _search_provider="serpapi",
+        )
     if prompt_debug_enabled():
         print_final_rank_debug(ranked_pages)
 
@@ -1463,7 +1597,6 @@ def chat_once(
         "model": model,
         "messages": messages,
         "stream": False,
-        "keep_alive": OLLAMA_REQUEST_KEEP_ALIVE,
         "options": options,
     }
     if think is not None:
@@ -2051,16 +2184,16 @@ def decide_search_needed(user_prompt: str, history: list[dict[str, str]]) -> tup
         openrouter_model_chain=OR_DECIDER_MODEL,
         think=False,
     ).strip()
-    label_match = re.search(r"\b(SEARCH|ANSWER)\b", content, flags=re.I)
+    label_match = re.search(r"\b(SEARCH|ANSWER|YES|NO)\b", content, flags=re.I)
     if not label_match:
         raise ValueError(
             f"Ollama search decider returned unexpected text: {content!r}; "
-            "expected SEARCH or ANSWER."
+            "expected SEARCH/ANSWER or YES/NO."
         )
     label = label_match.group(1).upper()
-    if label == "SEARCH":
-        return True, f"ollama decider answered SEARCH: {content}"
-    return False, f"ollama decider answered ANSWER: {content}"
+    if label in {"SEARCH", "NO"}:
+        return True, f"ollama decider answered {label}: {content}"
+    return False, f"ollama decider answered {label}: {content}"
 
 
 def parse_search_data_for_prompt(tool_json: str) -> dict[str, Any]:

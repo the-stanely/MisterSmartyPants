@@ -123,6 +123,15 @@ class OpenRouterChatTests(unittest.TestCase):
         self.assertEqual(run_search.call_args.kwargs["query"], "Would that work with chinos?")
         self.assertIn("failed; using user request", captured.getvalue())
 
+    def test_yahoo_sports_command_uses_yahoo_sports_domain(self) -> None:
+        session = websearchMCP.ChatSession(rich_output=False)
+        session.locked = False
+        with patch.object(session, "run_search_only") as search_only:
+            handled = session.handle_input("/yahoo-sports NFL scores")
+
+        self.assertTrue(handled)
+        search_only.assert_called_once_with("NFL scores", "site:sports.yahoo.com")
+
     def test_uses_openrouter_chain_and_retries_after_failure(self) -> None:
         failed_response = Mock()
         failed_response.raise_for_status.side_effect = websearchMCP.requests.HTTPError("unavailable")

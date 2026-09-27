@@ -276,6 +276,7 @@ Inside the chat, these slash commands are available:
 /stocks <query>    Run search only for stock market news.
 /weather <query>   Run search only for weather results for a city/state.
 /wiki <query>      Run search only against Wikipedia.
+/yahoo-sports <query> Run search only against Yahoo Sports.
 
 [Session Controls]
 /focus-off         Web UI: stop following output while working.
@@ -327,6 +328,8 @@ The adjacent **Share HTML** button creates a light-themed standalone HTML file a
 `/hn <query>` and `/stack <query>` are the same no-LLM mode, but with the search query biased to Hacker News or Stack Overflow/Exchange domains.
 
 `/weather <query>` is the same no-LLM mode, but with the query biased toward general weather results. It is web-search based, not a dedicated weather API.
+
+`/yahoo-sports <query>` is the same no-LLM mode, but restricts results to `sports.yahoo.com`. It does not require a Yahoo API key.
 
 `/news <query>` is the same no-LLM mode, but with the query biased toward current news and DDGS news results.
 
