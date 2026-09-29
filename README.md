@@ -272,6 +272,7 @@ Inside the chat, these slash commands are available:
 /hn <query>        Run search only against Hacker News.
 /news <query>      Run search only for current news.
 /search <query>    Run search only; bypass planner/decider and answer LLM.
+/serper <query>    Run search only via Google using Serper; requires SERPER_API_KEY.
 /stack <query>     Run search only against Stack Overflow/Exchange.
 /stocks <query>    Run search only for stock market news.
 /weather <query>   Run search only for weather results for a city/state.
@@ -320,6 +321,8 @@ Each completed non-system reply also has a **Copy formatted** button. It writes 
 The adjacent **Share HTML** button creates a light-themed standalone HTML file and opens the device share sheet. On Android, choose Google Drive to upload the file to the selected Google account and folder. In Drive, use **More** → **Open with** → **Google Docs** on that HTML file to import and edit it with its formatting and mobile word wrapping intact. Drive retains the uploaded HTML file; its upload timestamp distinguishes repeated exports. Google Docs for Android supports importing and editing HTML files.
 
 `/search <query>` is a strict search-engine mode: it bypasses the planner/decider and all LLM calls. It uses DDGS result metadata and fast meta-description enrichment (no full page extraction), ranks results with the metadata relevance ranker, and returns the top `SEARCH_ONLY_TOP_N` links with summaries.
+
+`/serper <query>` uses Google results through Serper in the same search-only mode, bypassing DDGS, the planner/decider, and all LLM calls. It requires `SERPER_API_KEY` in `.env`. Normal search-backed queries also use Serper as a backup when DDGS produces no usable candidates or no sources survive fetching.
 
 `/search-force` switches the session into forced search mode. Subsequent normal prompts use the full search-backed answer pipeline and skip only the planner/decider; DDGS search, fetch/extraction, ranking, optional summarization, final answer generation, source-link appending, and history updates still run. Use `/search-on` to return to planner/decider-controlled search, or `/search-off` to answer from memory and prior context.
 

@@ -132,8 +132,8 @@ DDGS_SAFESEARCH = os.getenv("DDGS_SAFESEARCH", "moderate").strip() or "moderate"
 DDGS_TIMELIMIT_RAW = os.getenv("DDGS_TIMELIMIT", "").strip()
 DDGS_TIMELIMIT = DDGS_TIMELIMIT_RAW or None
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
-SERPAPI_KEY = os.getenv("SERPAPI_KEY", "").strip()
-SERPAPI_URL = "https://serpapi.com/search.json"
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "").strip()
+SERPER_URL = "https://google.serper.dev/search"
 DEBUG = False
 
 PROMPT_DEBUG = os.getenv("PROMPT_DEBUG", "0") == "1"
@@ -1205,26 +1205,29 @@ def collect_ddgs_results(query: str, text_backend: str, news_backend: str) -> tu
     return raw_with_modes, mode_errors
 
 
-def collect_serpapi_results(query: str, max_results: int) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
-    if not SERPAPI_KEY:
-        return [], ["SERPAPI_KEY is not configured."]
+def collect_serper_results(query: str, max_results: int) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
+    if not SERPER_API_KEY:
+        return [], ["SERPER_API_KEY is not configured."]
 
     region_parts = DDGS_REGION.split("-", 1)
-    params = {
-        "engine": "google",
+    payload = {
         "q": query,
-        "api_key": SERPAPI_KEY,
         "num": min(100, max(1, max_results)),
     }
     if region_parts[0]:
-        params["gl"] = region_parts[0]
+        payload["gl"] = region_parts[0]
     if len(region_parts) > 1 and region_parts[1]:
-        params["hl"] = region_parts[1]
+        payload["hl"] = region_parts[1]
 
     try:
-        response = requests.get(SERPAPI_URL, params=params, timeout=DDGS_TIMEOUT_SECONDS)
+        response = requests.post(
+            SERPER_URL,
+            json=payload,
+            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+            timeout=DDGS_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
-        payload = response.json()
+        results = response.json()
     except requests.Timeout:
         return [], [f"request timed out after {DDGS_TIMEOUT_SECONDS}s"]
     except requests.RequestException as exc:
@@ -1234,15 +1237,16 @@ def collect_serpapi_results(query: str, max_results: int) -> tuple[list[tuple[st
     except ValueError:
         return [], ["response was not valid JSON"]
 
-    if not isinstance(payload, dict):
+    if not isinstance(results, dict):
         return [], ["response was not a JSON object"]
-    if payload.get("error"):
-        error_detail = str(payload["error"]).replace(SERPAPI_KEY, "[redacted]")
+    if results.get("message") or results.get("error"):
+        error_detail = str(results.get("message") or results.get("error"))
+        error_detail = error_detail.replace(SERPER_API_KEY, "[redacted]")
         return [], [f"API error: {error_detail[:300]}"]
 
     raw_with_modes: list[tuple[str, dict[str, Any]]] = []
-    for mode, field in (("text", "organic_results"), ("news", "news_results")):
-        rows = payload.get(field, [])
+    for mode, field in (("text", "organic"), ("news", "news")):
+        rows = results.get(field, [])
         if not isinstance(rows, list):
             continue
         for row in rows:
@@ -1326,9 +1330,9 @@ def run_search(
 ) -> str:
     # Normalize query format for DDGS compatibility
     query = normalize_query_for_ddgs(query)
-    if _search_provider == "serpapi":
-        print("[Search provider: SerpAPI fallback]")
-        raw_with_modes, mode_errors = collect_serpapi_results(
+    if _search_provider == "serper":
+        print("[Search provider: Serper]")
+        raw_with_modes, mode_errors = collect_serper_results(
             query,
             max(search_limit, SEARCH_TEXT_LIMIT, SEARCH_NEWS_LIMIT),
         )
@@ -1342,16 +1346,16 @@ def run_search(
 
     if not raw_with_modes:
         detail = "; ".join(mode_errors) if mode_errors else "No results found."
-        if _search_provider == "ddgs" and SERPAPI_KEY:
-            print("[Search fallback: DDGS returned no candidates; trying SerpAPI]")
-            raw_with_modes, mode_errors = collect_serpapi_results(
+        if _search_provider == "ddgs" and SERPER_API_KEY:
+            print("[Search fallback: DDGS returned no candidates; trying Serper]")
+            raw_with_modes, mode_errors = collect_serper_results(
                 query,
                 max(search_limit, SEARCH_TEXT_LIMIT, SEARCH_NEWS_LIMIT),
             )
-            _search_provider = "serpapi"
+            _search_provider = "serper"
             if not raw_with_modes:
                 fallback_detail = "; ".join(mode_errors) if mode_errors else "No results found."
-                raise RuntimeError(f"DDGS search failed: {detail}; SerpAPI fallback failed: {fallback_detail}")
+                raise RuntimeError(f"DDGS search failed: {detail}; Serper fallback failed: {fallback_detail}")
         else:
             raise RuntimeError(f"{_search_provider} search failed: {detail}")
 
@@ -1392,15 +1396,15 @@ def run_search(
             search_items.append(item)
 
     if not search_items:
-        if _search_provider == "ddgs" and SERPAPI_KEY:
-            print("[Search fallback: DDGS returned no usable URLs; trying SerpAPI]")
+        if _search_provider == "ddgs" and SERPER_API_KEY:
+            print("[Search fallback: DDGS returned no usable URLs; trying Serper]")
             return run_search(
                 query,
                 search_limit,
                 fetch_top_n,
                 fetch_scan_limit,
                 fetch_max_chars,
-                _search_provider="serpapi",
+                _search_provider="serper",
             )
         raise RuntimeError(f"{_search_provider} produced no usable URL candidates.")
 
@@ -1481,15 +1485,15 @@ def run_search(
                 f"{item.get('ms', '?')} ms] {item.get('url', '')} "
                 f"({item.get('reason', 'unknown reason')})"
             )
-    if not fetched_pages and _search_provider == "ddgs" and SERPAPI_KEY:
-        print("[Search fallback: DDGS candidates yielded no usable sources; trying SerpAPI]")
+    if not fetched_pages and _search_provider == "ddgs" and SERPER_API_KEY:
+        print("[Search fallback: DDGS candidates yielded no usable sources; trying Serper]")
         return run_search(
             query,
             search_limit,
             fetch_top_n,
             fetch_scan_limit,
             fetch_max_chars,
-            _search_provider="serpapi",
+            _search_provider="serper",
         )
     if prompt_debug_enabled():
         print_final_rank_debug(ranked_pages)
@@ -2449,6 +2453,7 @@ def print_commands() -> None:
     print("/hn <query>        Search only Hacker News. Returns clickable story links and summaries.")
     print("/news <query>      Search only current news. Returns clickable links and summaries.")
     print("/search <query>    Search only; bypass decider, query builder, and LLM. Returns clickable links.")
+    print("/serper <query>    Search only via Google using Serper. Requires SERPER_API_KEY.")
     print("/stack <query>     Search only Stack Overflow/Exchange. Returns clickable post links and summaries.")
     print("/stocks <query>    Search only stock market news. Returns clickable links and summaries.")
     print("/weather <query>   Search only weather for a city/state. Returns clickable links and summaries.")
@@ -2506,19 +2511,24 @@ class ChatSession:
         finally:
             self._reset_context(tokens)
 
-    def run_search_only(self, query: str, query_prefix: str = "") -> None:
-        # Uses DDGS snippets enriched with fast streaming meta-description fetches.
-        # No full page extraction — short timeout prevents hangs on finance/news sites.
+    def run_search_only(self, query: str, query_prefix: str = "", search_provider: str = "ddgs") -> None:
+        # Uses search snippets enriched with fast meta-description fetches, without full page extraction.
         tokens = self._set_context()
         try:
             search_start = time.perf_counter()
             search_query = normalize_query_for_ddgs(f"{query_prefix} {query}".strip())
-            raw_with_modes, mode_errors = collect_ddgs_results(
-                search_query, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND
-            )
+            if search_provider == "serper":
+                raw_with_modes, mode_errors = collect_serper_results(
+                    search_query,
+                    max(SEARCH_ONLY_TOP_N, SEARCH_TEXT_LIMIT, SEARCH_NEWS_LIMIT),
+                )
+            else:
+                raw_with_modes, mode_errors = collect_ddgs_results(
+                    search_query, DDGS_TEXT_BACKEND, DDGS_NEWS_BACKEND
+                )
             if not raw_with_modes:
                 detail = "; ".join(mode_errors) if mode_errors else "No results found."
-                raise RuntimeError(f"Search failed: {detail}")
+                raise RuntimeError(f"{search_provider.upper()} search failed: {detail}")
 
             search_items: list[dict[str, str]] = []
             seen_urls: set[str] = set()
@@ -2841,6 +2851,22 @@ class ChatSession:
             return True
         if user_query.lower() == "/search":
             print("[System] Usage: /search <query>")
+            print()
+            return True
+        if user_query.lower().startswith("/serper "):
+            search_query = user_query[len("/serper "):].strip()
+            if not search_query:
+                print("[System] Usage: /serper <query>")
+                print()
+                return True
+            if not SERPER_API_KEY:
+                print("[System] Set SERPER_API_KEY in .env to use /serper.")
+                print()
+                return True
+            self.run_search_only(search_query, search_provider="serper")
+            return True
+        if user_query.lower() == "/serper":
+            print("[System] Usage: /serper <query>")
             print()
             return True
         if user_query.lower().startswith("/arxiv "):
