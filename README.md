@@ -1,10 +1,18 @@
 # MisterSmartyPants
 
-MisterSmartyPants is a local AI chat demo that combines an Ollama-hosted chat model with built-in search. Live web search is triggered when a query needs current information or knowledge beyond the model's training. Search articles are extracted, scored for relevance, and summarized before being sent to the chat LLM. It is important to note that not all LLMs reliably use new information supplied in context; models that handle RAG-style context well will perform best.
+MisterSmartyPants began as an experiment in adding retrieval-augmented generation (RAG) to a local inference server. It has evolved into a **3-in-1 RAG chat application and research engine**: run it in a console, use its browser interface, or connect it to Unsloth Studio. MSP decides when research is needed, retrieves and ranks source material, optionally summarizes it, and supplies relevant evidence to the answer model. The Studio integration adds a path for multi-user use, with Studio managing accounts and durable conversations while MSP supplies research and inference orchestration.
 
-This demo was developed on a slow CPU-only, memory-bound system, yet it performs surprisingly well. It supports local Ollama models and OpenRouter model chains. In the current default configuration, a strong OpenRouter planner decides whether ordinary conversational turns need web search, while local Hugging Face models remain available for decider, ranking, and summary paths.
+The console and MSP browser share model settings and support local Ollama inference or OpenRouter model chains. The Unsloth integration uses Studio's loaded local model for the decider and final answer. All three share MSP's retrieval pipeline and configured Python/Transformers components. Originally developed on a slow, CPU-only system, MSP keeps the answer model focused on selected source passages rather than raw search results. Answer quality still depends on the model's ability to use supplied evidence.
 
-This project started as a practical experiment in making local models better at current-event questions without dumping raw search results into the final LLM prompt. The current pipeline tries to keep the slow, capable model focused on clean, relevant, current source material.
+| Usage method | Launch | Decider and answer models | Conversation management |
+| --- | --- | --- | --- |
+| Console | `run.ps1` | Ollama or OpenRouter, as configured in `.env` | One in-memory conversation per process. |
+| MSP browser | `run-server.ps1` → `http://127.0.0.1:8080` | Same configuration as console. | Temporary cookie-based sessions; limited local transcript recovery. |
+| Unsloth Studio | `run-studio-bridge.ps1` → select `msp` in Studio | Studio's loaded model, selected by `STUDIO_MODEL`. | Studio accounts and saved chats; evidence travels with each conversation. |
+
+For Studio, start with the [setup guide](docs/unsloth-setup.md) and
+[architecture description](docs/unsloth-architecture.md). The bridge remains a
+development integration undergoing broader testing.
 
 ## Consulting / Custom AI Tools
 
@@ -16,18 +24,17 @@ If you have a problem or need help, open an issue on GitHub.
 
 ## What It Does
 
-MisterSmartyPants can run as either:
-
-- a terminal chat application
-- a simple HTTP chat server with a browser frontend
+All three interfaces use the same core research flow. A question can be answered
+from existing context or trigger a new search, according to the selected decider,
+forced-search rules and chat controls.
 
 For search-backed answers, the pipeline is roughly:
 
 ```text
 user question
-  -> explicit command / forced-search rule, or search planner
-  -> planner-supplied search query when search is needed
-  -> web search (DDGS)
+  -> explicit command / forced-search rule, or configured search decider
+  -> planner-supplied query, contextual query rewrite, or original question
+  -> DDGS web search, with Serper fallback when configured
   -> metadata enrichment (optional)
   -> pre-fetch relevance rank (title/url/date/snippet)
   -> fetch candidate pages
@@ -35,34 +42,79 @@ user question
   -> fallback extraction (GitHub API, then Trafilatura)
   -> post-fetch relevance rank (with extracted text)
   -> optional article summarization (Ollama/OpenRouter or Python Transformers)
-  -> final LLM answer (Ollama or OpenRouter)
+  -> final LLM answer (Ollama, OpenRouter, or Studio's local model)
 ```
 
 The goal is to reduce prompt bloat, keep poor search results away from the final answer model, and improve performance on slow hardware.
 
 ## Features
 
-- Ollama or OpenRouter final answer model chains
-- Strong OpenRouter search planner, plus optional Ollama or Python/Transformers deciders
-- DDGS web search using news and text search modes
+### Shared research engine and settings
+
+- Configurable search decisions: `planner` returns a decision and search query in one LLM call; `ollama` makes the decision and can use a separate contextual query rewrite; `python` uses a local Transformers decider in console/browser modes.
+- Ollama model selection or ordered OpenRouter fallback chains for console/browser inference; a request-scoped Studio model override for the integration.
+- DDGS search with configurable result counts and news/text modes; optional Serper fallback when DDGS produces no usable results.
 - URL-based API adapters for Wikipedia, arXiv, Stack Exchange, and Hacker News
 - URL-aware GitHub API fetching for GitHub profile and repository results
 - Optional metadata enrichment before the first rank pass
 - Trafilatura article extraction
 - Cross-encoder relevance ranking (pre-fetch and post-fetch)
-- Configurable article summarization through Ollama or Python Transformers
-- Rich Markdown terminal rendering
-- Browser chat UI through FastAPI
-- Per-browser sessions with mobile-friendly cookie renewal and local transcript restore
-- Slash commands for debugging and testing
-- `.env.example` configuration template
-- Windows PowerShell install/run scripts
+- Configurable fetch counts, extraction lengths, worker counts and optional article summarization through configured LLM or Python/Transformers providers.
+- Source-linked answers and retained evidence for follow-up questions, including when fresh search is disabled.
+- `.env` settings for prompts, models, routing context, retrieval, summaries and generation budgets; `.env.example` provides the template. The Studio bridge adds the settings in `studio-bridge.env.example`.
+- Slash controls for search on/off/forced, final generation, verbose output and prompt inspection. Command availability varies by interface; use `/?` for the current mode.
+- Windows PowerShell installation and launch scripts.
+
+### Console
+
+The console provides Rich Markdown output and direct access to MSP's commands,
+making it useful for local research, pipeline inspection and model experiments.
+It maintains one conversation in process memory, including source evidence and
+chat switches. `/new` clears that context. There is no account system, saved-chat
+library or automatic conversation recovery after exit.
+
+### MSP browser
+
+The FastAPI browser interface adds formatted chat, copy controls, optional
+password/passkey unlock, background requests and SSE completion notifications.
+Each browser cookie receives an independent in-memory `ChatSession`, with its own
+history, evidence and chat controls. It uses the console's provider configuration.
+
+This interface is intended for a small trusted deployment, with these limits:
+
+- Passwords and registered passkeys grant site-level access; they do not create individual accounts, roles or account-owned chat libraries.
+- There is one active conversation per browser session cookie. Tabs in the same profile share it; separate devices do not synchronize. There is no named-chat list, conversation switching or branching.
+- Restarting the server loses active history, evidence, chat settings and unlock state. The browser can restore up to 100 recent turns from local storage, but those are review-only if matching server context is gone.
+- Requests within a session are serialized. Different sessions can overlap against shared model/configuration state; process-wide stdout/stderr capture can mix output during concurrent requests. This is a limitation for broader multi-user use.
+- Sessions and completed jobs remain in memory without automatic cleanup. Session state is not shared across multiple server workers.
+
+### Unsloth Studio
+
+Studio provides account login, saved conversations and its chat UI. Each account
+can configure MSP as an OpenAI Chat Completions provider. The bridge uses the
+actual model named by `STUDIO_MODEL` for the decider and answer, leaving the loaded
+model resident. Both `planner` and `ollama` decision modes are supported; despite
+its name, `ollama` mode uses Studio inference when invoked through the bridge.
+Existing retrieval, ranking and optional summarization settings remain shared.
+
+The bridge reconstructs chat controls from Studio's supplied transcript. Selected
+source passages travel in independently checksummed, uncompressed envelopes in
+assistant HTML comments. On later turns MSP restores intact passages for answer
+generation, keeping restored evidence out of the decider's dialogue. It needs no
+separate evidence database or user-to-chat mapping.
+
+- `/evidence` lists retained sources and context measurements; `/evidence show` displays full passages. Studio stores these diagnostic replies too, so they can contribute to its trimming load even though MSP excludes command exchanges from inference.
+- Studio owns chat creation and selection. The connector omits `/new`, focus controls and the MSP lock/unlock flow. Optional account-memory labels checked with `/user` are diagnostics, not authentication.
+- `STUDIO_BASE_URL`, `STUDIO_MODEL` and optional `STUDIO_API_KEY` control inference. Optional `MSP_BRIDGE_API_KEY` controls access to the bridge separately from Studio login. Settings share `.env`, but this inference override does not change the console/browser provider.
+- Model discovery advertises the configured loaded model's active context window when available. The bridge permits an output allowance up to 32768 tokens; this is separate from the total context limit. Studio trimming can remove earlier dialogue, controls and evidence.
+- The development launcher binds to loopback and allows one active pipeline request; overlaps receive HTTP 429. It supports text Chat Completions and buffered SSE, with no true token streaming, heartbeat, attachments, tool calls, Responses API or exact token accounting.
+- Multi-user conversation ownership and access depend on Studio. MSP does not independently authenticate the Studio end user, and managed accounts may need separate connector setup. This is a broader-testing integration rather than a completed high-concurrency service.
 
 ## Requirements
 
 - Windows PowerShell
 - Python 3.10 or newer
-- Ollama installed and running, or an OpenRouter API key and model chain
+- Ollama installed and running, an OpenRouter API key and model chain, or Unsloth Studio with a loaded local model for the integration path
 - At least one local Ollama model only when using Ollama-based answer or summary paths
 - Internet access for web search and first-time Hugging Face model downloads
 
@@ -101,6 +153,9 @@ Open:
 ```text
 http://127.0.0.1:8080
 ```
+
+For the third mode, follow the [Unsloth Studio setup guide](docs/unsloth-setup.md),
+then launch `run-studio-bridge.ps1` and select the `msp` connector in Studio.
 
 ## Ollama Setup
 
@@ -342,6 +397,17 @@ Yahoo is no longer treated as a preferred source in the default ranking order.
 
 ## HTTP Server
 
+For the local Unsloth Studio development integration, see the
+[step-by-step setup guide](docs/unsloth-setup.md) and
+[architecture description](docs/unsloth-architecture.md).
+It exposes MSP as a Chat Completions provider while using Studio's loaded model
+for inference. Start it separately with `run-studio-bridge.ps1`.
+
+![MisterSmartyPants with Unsloth Studio](MisterSmartyPants-Unsloth-Diagram.png)
+
+Detailed command, evidence transport and validation notes are in
+[Studio bridge development tests](plans/studio-bridge-test.md).
+
 The HTTP server is implemented in `server.py` with FastAPI.
 
 Run it with:
@@ -469,6 +535,7 @@ First run may download Python model files. Later runs should use the local Huggi
 install.ps1          Install Python dependencies into .venv
 run.ps1              Run terminal chat
 run-server.ps1       Run HTTP server on port 8080
+run-studio-bridge.ps1 Run the Unsloth Studio bridge on loopback port 8081
 export-vscode.ps1    Export local VS Code settings/extensions
 import-vscode.ps1    Restore local VS Code settings/extensions
 ```

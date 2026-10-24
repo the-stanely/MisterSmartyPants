@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1100" viewBox="0 0 1600 1100">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke="#234769" stroke-width="1.5"/></marker></defs>
+<rect width="1600" height="1100" fill="#ffffff"/>
+<style>text{font-family:Segoe UI,Arial,sans-serif;fill:#14304d}.title{font-size:42px;font-weight:700}.heading{font-size:23px;font-weight:700}.body{font-size:19px}.label{font-size:17px;font-weight:600}.small{font-size:17px}</style>
+<text x="40" y="61" class="title">MisterSmartyPants + Unsloth Studio</text>
+<text x="42" y="99" class="body">Studio owns the chat. MSP orchestrates research. The loaded local model decides and answers.</text>
+<rect x="35" y="145" width="440" height="600" rx="15" fill="#eef6ff" stroke="#a8cfee"/>
+<text x="57" y="182" class="heading">Unsloth Studio · chat &amp; history</text>
+<rect x="57" y="207" width="396" height="149" rx="15" fill="#ffffff" stroke="#a8cfee"/>
+<text x="79" y="244" class="heading">Browser chat</text>
+<text x="79" y="279" class="body">Owner or managed account</text>
+<text x="79" y="308" class="body">Select the msp connector</text>
+<text x="79" y="337" class="body">Local browser or Studio LAN access</text>
+<rect x="57" y="388" width="396" height="151" rx="15" fill="#ffffff" stroke="#a8cfee"/>
+<text x="79" y="425" class="heading">Studio backend</text>
+<text x="79" y="460" class="body">Account login, memory and chats</text>
+<text x="79" y="489" class="body">Stores replies and source envelopes</text>
+<text x="79" y="518" class="body">Sends history; manages trimming</text>
+<rect x="57" y="573" width="396" height="140" rx="15" fill="#ffffff" stroke="#a8cfee"/>
+<text x="79" y="610" class="heading">Per-account connector</text>
+<text x="79" y="645" class="body">OpenAI Chat Completions</text>
+<text x="79" y="674" class="body">http://127.0.0.1:8081/v1</text>
+<text x="79" y="703" class="body">Model: msp</text>
+<path d="M255 356 V386" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>
+<path d="M255 539 V571" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>
+<rect x="540" y="145" width="510" height="600" rx="15" fill="#eff9ef" stroke="#a5cea9"/>
+<text x="562" y="182" class="heading">MisterSmartyPants · loopback :8081</text>
+<rect x="562" y="207" width="466" height="149" rx="15" fill="#ffffff" stroke="#a5cea9"/>
+<text x="584" y="244" class="heading">1  Reconstruct this chat</text>
+<text x="584" y="279" class="body">Restore controls and intact evidence</text>
+<text x="584" y="308" class="body">Omit slash-command exchanges</text>
+<text x="584" y="337" class="body">No MSP conversation database</text>
+<rect x="562" y="388" width="466" height="116" rx="15" fill="#ffffff" stroke="#a5cea9"/>
+<text x="584" y="425" class="heading">2  Existing search decision</text>
+<text x="584" y="460" class="body">Dialogue only → local model</text>
+<text x="584" y="489" class="body">ANSWER skips new retrieval</text>
+<rect x="562" y="537" width="466" height="176" rx="15" fill="#ffffff" stroke="#a5cea9"/>
+<text x="584" y="574" class="heading">3  SEARCH: existing MSP pipeline</text>
+<text x="584" y="609" class="body">Query → search → initial ranking</text>
+<text x="584" y="638" class="body">Fetch pages / source API extraction</text>
+<text x="584" y="667" class="body">Select sources; optional summaries</text>
+<text x="584" y="696" class="body">Prepared passages + provenance</text>
+<path d="M795 356 V386" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>
+<path d="M795 504 V535" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="810" y="526" class="small">SEARCH</text>
+<path d="M453 630 H505 V280 H560" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="478" y="598" class="small">history</text>
+<rect x="1120" y="145" width="445" height="340" rx="15" fill="#fff4e8" stroke="#e6bf99"/>
+<text x="1142" y="182" class="heading">Unsloth Studio · inference :8888</text>
+<rect x="1142" y="207" width="401" height="242" rx="15" fill="#ffffff" stroke="#e6bf99"/>
+<text x="1164" y="244" class="heading">Actual loaded local model</text>
+<text x="1164" y="279" class="body">Example: Gemma 4 E4B GGUF</text>
+<text x="1164" y="308" class="body">Same model for decider + answer</text>
+<text x="1164" y="337" class="body">POST /v1/chat/completions</text>
+<text x="1164" y="366" class="body">STUDIO_MODEL = real model ID</text>
+<text x="1164" y="395" class="body">Never msp or default</text>
+<text x="1164" y="424" class="body">No tools / provider recursion</text>
+<path d="M1028 433 H1090 V300 H1140" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="1057" y="382" class="small">decide</text>
+<rect x="1120" y="537" width="445" height="208" rx="15" fill="#f4efff" stroke="#c7b3ef"/>
+<text x="1142" y="574" class="heading">4  Build the final answer</text>
+<text x="1142" y="609" class="body">MSP sends dialogue + readable sources</text>
+<text x="1142" y="638" class="body">Studio runs answer inference</text>
+<text x="1142" y="667" class="body">MSP returns answer + source links</text>
+<text x="1142" y="696" class="body">Append only new source envelopes</text>
+<path d="M1028 625 H1118" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>
+<path d="M1028 475 H1070 V565 H1118" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="1045" y="519" class="small">ANSWER</text>
+<path d="M1340 537 V487" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="1360" y="515" class="small">answer inference</text>
+<path d="M1342 745 V794 H255 V747" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)" stroke-dasharray="9 6"/>
+<text x="460" y="784" class="label">Answer + independently encoded source blocks → Studio saves them with this chat</text>
+<rect x="35" y="832" width="740" height="214" rx="15" fill="#eef6ff" stroke="#a8cfee"/>
+<text x="57" y="869" class="heading">Evidence travels with the conversation</text>
+<text x="57" y="904" class="body">Uncompressed JSON → base64 HTML comments + SHA-256</text>
+<text x="57" y="933" class="body">Next turn: decode intact blocks into dated prior-search context</text>
+<text x="57" y="962" class="body">Damaged blocks are discarded independently; no shared cache</text>
+<text x="57" y="991" class="body">Studio trimming can remove evidence; /evidence inspects survivors</text>
+<rect x="800" y="832" width="765" height="214" rx="15" fill="#eff9ef" stroke="#a5cea9"/>
+<text x="822" y="869" class="heading">Context, discovery &amp; development limits</text>
+<text x="822" y="904" class="body">/v1/models advertises the loaded model’s active context window</text>
+<text x="822" y="933" class="body">128K tested context; 32768-token maximum output allowance</text>
+<text x="822" y="962" class="body">One active MSP request; buffered SSE; text chat only</text>
+<text x="822" y="991" class="body">Diagnostic replies stay in Studio history but are omitted by MSP</text>
+<text x="40" y="1080" class="small">Solid arrows: request flow     Dashed arrow: reply / evidence return     Both services run on the same host</text>
+</svg>

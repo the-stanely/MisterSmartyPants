@@ -9,6 +9,20 @@ import websearchMCP
 
 
 class OpenRouterChatTests(unittest.TestCase):
+    def test_search_normalization_preserves_possessives_and_contractions(self) -> None:
+        prompt = "Tell me about the nature of Julian Sayin's injury sustained during the Indiana game on 10/17/2026. Also provide the latest updates."
+        self.assertEqual(websearchMCP.normalize_query_for_ddgs(prompt), prompt)
+        query = "Sayin's injury isn't serious; coach's update"
+        self.assertEqual(websearchMCP.normalize_query_for_ddgs(query), query)
+        self.assertEqual(websearchMCP.quoted_spans(query), [])
+
+    def test_search_normalization_keeps_explicit_phrase_quotes(self) -> None:
+        query = "Sayin's injury 'latest update'"
+        self.assertEqual(websearchMCP.normalize_query_for_ddgs(query), 'Sayin\'s injury "latest update"')
+        self.assertEqual(websearchMCP.quoted_spans(query), ["latest update"])
+        self.assertEqual(websearchMCP.restore_user_quotes(query, "Sayin's injury latest update"),
+                         'Sayin\'s injury "latest update"')
+
     def test_routing_context_keeps_recent_dialogue_and_excludes_search_evidence(self) -> None:
         history = [
             {"role": "user", "content": "Let's discuss business casual."},

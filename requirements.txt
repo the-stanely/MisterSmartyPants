@@ -11,4 +11,5 @@ transformers
 fastapi
 fido2
 pytest
+httpx
 uvicorn

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 from contextvars import ContextVar
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -20,6 +21,23 @@ from ddgs import DDGS
 from rich.console import Console
 from rich.markdown import Markdown
 import trafilatura
+
+# Request-scoped inference override for integrations. Existing CLI/server callers
+# continue to use their configured Ollama/OpenRouter provider.
+CHAT_PROVIDER_CONTEXT: ContextVar[Any] = ContextVar("chat_provider", default=None)
+OUTPUT_CONTEXT: ContextVar[Any] = ContextVar("msp_output", default=None)
+
+
+def print(*args: Any, **kwargs: Any) -> None:
+    """Keep terminal output, optionally tee this request's MSP text to a sink.
+
+    This does not replace sys.stdout or capture unrelated threads/libraries.
+    """
+    builtins.print(*args, **kwargs)
+    sink = OUTPUT_CONTEXT.get()
+    if sink is not None and kwargs.get("file") in (None, sys.stdout):
+        captured_kwargs = {**kwargs, "file": sink}
+        builtins.print(*args, **captured_kwargs)
 
 try:
     from dotenv import load_dotenv
@@ -58,6 +76,7 @@ OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 OLLAMA_TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
 OLLAMA_TOP_P = float(os.getenv("OLLAMA_TOP_P", "0.9"))
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
+OLLAMA_REQUEST_KEEP_ALIVE = os.getenv("OLLAMA_REQUEST_KEEP_ALIVE", "-1m").strip() or "-1m"
 OLLAMA_NUM_THREAD_RAW = os.getenv("OLLAMA_NUM_THREAD", "").strip()
 OLLAMA_NUM_THREAD = int(OLLAMA_NUM_THREAD_RAW) if OLLAMA_NUM_THREAD_RAW else None
 USE_OPENROUTER = os.getenv("USE_OPENROUTER", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -1580,6 +1599,11 @@ def chat_once(
     think: bool | None = None,
 ) -> str:
     serialized_messages = validate_llm_messages(messages)
+    provider = CHAT_PROVIDER_CONTEXT.get()
+    if provider is not None:
+        if prompt_debug_enabled():
+            print_prompt_debug(messages, serialized_messages, getattr(provider, "model", model))
+        return provider(messages, num_predict=num_predict, think=think)
     selected_openrouter_chain = openrouter_model_chain or OPENROUTER_MODEL_CHAIN
     if prompt_debug_enabled():
         prompt_model = selected_openrouter_chain[0] if USE_OPENROUTER and selected_openrouter_chain else model
@@ -1601,6 +1625,7 @@ def chat_once(
         "model": model,
         "messages": messages,
         "stream": False,
+        "keep_alive": OLLAMA_REQUEST_KEEP_ALIVE,
         "options": options,
     }
     if think is not None:
@@ -2087,7 +2112,7 @@ def validate_search_query(query: str) -> str:
 
 def quoted_spans(text: str) -> list[str]:
     spans = re.findall(r'"([^"\r\n]+)"', text)
-    spans.extend(re.findall(r"'([^'\r\n]+)'", text))
+    spans.extend(re.findall(r"(?<!\w)'([^'\r\n]+)'(?!\w)", text))
     seen: set[str] = set()
     result: list[str] = []
     for span in spans:
@@ -2109,11 +2134,8 @@ def restore_user_quotes(user_prompt: str, query: str) -> str:
 
 
 def normalize_query_for_ddgs(query: str) -> str:
-    """Ensure quotes in query are properly formatted for DDGS."""
-    # DDGS expects quoted phrases to work, but let's ensure consistent quote style
-    # Convert any mixed quotes to standard double quotes
-    query = query.replace("'", '"')
-    return query
+    """Normalize standalone single-quoted phrases without changing apostrophes."""
+    return re.sub(r"(?<!\w)'([^'\r\n]+)'(?!\w)", lambda match: f'"{match[1]}"', query)
 
 
 def canonicalize_source_url(url: str) -> str:
@@ -2457,6 +2479,7 @@ def print_commands() -> None:
     print("/stack <query>     Search only Stack Overflow/Exchange. Returns clickable post links and summaries.")
     print("/stocks <query>    Search only stock market news. Returns clickable links and summaries.")
     print("/weather <query>   Search only weather for a city/state. Returns clickable links and summaries.")
+    print("/yahoo-sports <query> Search only Yahoo Sports. Returns clickable links and summaries.")
     print("/wiki <query>      Search only Wikipedia. Returns clickable page links and summaries.")
     print()
     print("[Session Controls]")
@@ -2482,6 +2505,8 @@ def print_commands() -> None:
 class ChatSession:
     def __init__(self, rich_output: bool = True) -> None:
         self.history: list[dict[str, str]] = []
+        self.last_search_result: str | None = None
+        self.last_search_query: str | None = None
         self.rich_output = rich_output
         self.prompt_debug = PROMPT_DEBUG
         self.llm_enabled = LLM_ENABLED
@@ -2504,10 +2529,14 @@ class ChatSession:
         PROMPT_DEBUG_CONTEXT.reset(prompt_token)
         LLM_ENABLED_CONTEXT.reset(llm_token)
 
-    def run_query(self, query: str) -> None:
+    def run_query(self, query: str) -> str | None:
+        previous_length = len(self.history)
         tokens = self._set_context()
         try:
             self._run_query(query)
+            if len(self.history) > previous_length and self.history[-1]["role"] == "assistant":
+                return self.history[-1]["content"]
+            return None
         finally:
             self._reset_context(tokens)
 
@@ -2586,6 +2615,8 @@ class ChatSession:
             self._reset_context(tokens)
 
     def _run_query(self, query: str) -> None:
+        self.last_search_result = None
+        self.last_search_query = None
         if not self.search_enabled and not self.search_forced:
             llm_start = time.perf_counter()
             if not llm_enabled():
@@ -2704,6 +2735,10 @@ class ChatSession:
         elif SUMMARIZE_EXCERPTS:
             print(f"[Summaries skipped: {len(result)} chars <= {SUMMARIZE_EXCERPTS_MIN_CHARS} threshold]")
 
+        # The Studio bridge carries this turn's prepared sources in the reply.
+        # Existing CLI/server history and answer generation remain unchanged.
+        self.last_search_result = result
+        self.last_search_query = search_query
         llm_start = time.perf_counter()
         if not llm_enabled():
             llm_ms = (time.perf_counter() - llm_start) * 1000
@@ -2932,6 +2967,18 @@ class ChatSession:
             print("[System] Usage: /weather <city, state>")
             print()
             return True
+        if user_query.lower().startswith("/yahoo-sports "):
+            search_query = user_query[len("/yahoo-sports "):].strip()
+            if not search_query:
+                print("[System] Usage: /yahoo-sports <query>")
+                print()
+                return True
+            self.run_search_only(search_query, "site:sports.yahoo.com")
+            return True
+        if user_query.lower() == "/yahoo-sports":
+            print("[System] Usage: /yahoo-sports <query>")
+            print()
+            return True
         if user_query.lower().startswith("/news "):
             search_query = user_query[len("/news "):].strip()
             if not search_query:
@@ -2992,7 +3039,7 @@ class ChatSession:
             decision = "SEARCH" if should_search else "ANSWER"
             print(format_decider_elapsed(decider_ms, decision))
             print(f"{decision} | {reason}")
-            if should_search:
+            if should_search and not search_query:
                 query_builder_start = time.perf_counter()
                 try:
                     search_query = derive_search_query(decider_prompt)
