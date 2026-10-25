@@ -8,7 +8,7 @@ The console and MSP browser share model settings and support local Ollama infere
 | --- | --- | --- | --- |
 | Console | `run.ps1` | Ollama or OpenRouter, as configured in `.env` | One in-memory conversation per process. |
 | MSP browser | `run-server.ps1` → `http://127.0.0.1:8080` | Same configuration as console. | Temporary cookie-based sessions; limited local transcript recovery. |
-| Unsloth Studio | `run-studio-bridge.ps1` → select `msp` in Studio | Studio's loaded model, selected by `STUDIO_MODEL`. | Studio accounts and saved chats; evidence travels with each conversation. |
+| Unsloth Studio | `run-studio-bridge.ps1` → select `msp` in Studio | Studio's single loaded local model, discovered automatically. | Studio accounts and saved chats; evidence travels with each conversation. |
 
 For Studio, start with the [setup guide](docs/unsloth-setup.md) and
 [architecture description](docs/unsloth-architecture.md). The bridge remains a
@@ -61,7 +61,7 @@ The goal is to reduce prompt bloat, keep poor search results away from the final
 - Cross-encoder relevance ranking (pre-fetch and post-fetch)
 - Configurable fetch counts, extraction lengths, worker counts and optional article summarization through configured LLM or Python/Transformers providers.
 - Source-linked answers and retained evidence for follow-up questions, including when fresh search is disabled.
-- `.env` settings for prompts, models, routing context, retrieval, summaries and generation budgets; `.env.example` provides the template. The Studio bridge adds the settings in `studio-bridge.env.example`.
+- `.env` settings for prompts, models, routing context, retrieval, summaries and generation budgets; `.env.example` is the single configuration template for console, browser and the Studio bridge, with credentials left blank.
 - Slash controls for search on/off/forced, final generation, verbose output and prompt inspection. Command availability varies by interface; use `/?` for the current mode.
 - Windows PowerShell installation and launch scripts.
 
@@ -92,7 +92,7 @@ This interface is intended for a small trusted deployment, with these limits:
 
 Studio provides account login, saved conversations and its chat UI. Each account
 can configure MSP as an OpenAI Chat Completions provider. The bridge uses the
-actual model named by `STUDIO_MODEL` for the decider and answer, leaving the loaded
+single loaded local model for the decider and answer, leaving the loaded
 model resident. Both `planner` and `ollama` decision modes are supported; despite
 its name, `ollama` mode uses Studio inference when invoked through the bridge.
 Existing retrieval, ranking and optional summarization settings remain shared.
@@ -105,7 +105,7 @@ separate evidence database or user-to-chat mapping.
 
 - `/evidence` lists retained sources and context measurements; `/evidence show` displays full passages. Studio stores these diagnostic replies too, so they can contribute to its trimming load even though MSP excludes command exchanges from inference.
 - Studio owns chat creation and selection. The connector omits `/new`, focus controls and the MSP lock/unlock flow. Optional account-memory labels checked with `/user` are diagnostics, not authentication.
-- `STUDIO_BASE_URL`, `STUDIO_MODEL` and optional `STUDIO_API_KEY` control inference. Optional `MSP_BRIDGE_API_KEY` controls access to the bridge separately from Studio login. Settings share `.env`, but this inference override does not change the console/browser provider.
+- `STUDIO_BASE_URL` and optional `STUDIO_API_KEY` control inference access. Model selection happens in Studio; MSP discovers the single loaded local model once per request. No model setting or reload is needed when switching models. Optional `MSP_BRIDGE_API_KEY` controls access to the bridge separately from Studio login. Settings share `.env`, but this inference override does not change the console/browser provider.
 - Model discovery advertises the configured loaded model's active context window when available. The bridge permits an output allowance up to 32768 tokens; this is separate from the total context limit. Studio trimming can remove earlier dialogue, controls and evidence.
 - The development launcher binds to loopback and allows one active pipeline request; overlaps receive HTTP 429. It supports text Chat Completions and buffered SSE, with no true token streaming, heartbeat, attachments, tool calls, Responses API or exact token accounting.
 - Multi-user conversation ownership and access depend on Studio. MSP does not independently authenticate the Studio end user, and managed accounts may need separate connector setup. This is a broader-testing integration rather than a completed high-concurrency service.

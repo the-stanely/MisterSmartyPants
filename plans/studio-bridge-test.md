@@ -23,8 +23,9 @@ access for this local test. This is separate from the Studio user login; keep th
 login enabled. An earlier unauthenticated `/v1/models` probe returned 401, so the
 keyless setting needs to be enabled before the no-key inference test will work.
 
-Append the entries from `studio-bridge.env.example` to the existing untracked
-`.env`. Preserve all existing MSP prompts, search settings, and decider settings.
+The single `.env.example` template includes both core MSP and Studio bridge
+settings. Add/update the Studio entries in the existing untracked `.env`;
+preserve existing MSP prompts, search settings, and decider settings.
 `SEARCH_DECIDER=planner` and `SEARCH_DECIDER=ollama` both use the Studio adapter;
 the Python decider is rejected for this prototype. The active decider's prompt
 and decision parsing remain unchanged. Existing planner failure fallback also
@@ -34,11 +35,12 @@ remains unchanged: a failed planner can select the direct-answer path.
   if you want the bridge to require a bearer key, including for local callers.
 - `STUDIO_API_KEY`: leave blank when Studio keyless inference access is enabled.
   A configured value is still supported if you later choose authenticated inference.
-- `STUDIO_MODEL`: the exact local Gemma identifier returned by Studio's model API.
+- Model selection: load exactly one local inference model in Studio; MSP discovers it automatically per request.
 - `STUDIO_BASE_URL`: Studio's local inference API, normally `http://127.0.0.1:8888/v1`.
 
-No credentials are needed for the keyless local setup. Do not select `msp`, `msp-gemma`, or `default` as
-`STUDIO_MODEL`. Do not point `STUDIO_BASE_URL` at the bridge. The adapter rejects
+No credentials are needed for the keyless local setup. MSP selects only a real
+loaded local model, never `msp`, `msp-gemma` or `default`. Do not point
+`STUDIO_BASE_URL` at the bridge. The adapter rejects
 the bridge port, nonlocal URLs, default/MSP model identifiers, and redirects.
 It sends no tool definitions or provider-selection options to Studio.
 
@@ -73,24 +75,24 @@ Disable Studio tools/MCP for this provider; MSP controls research. If Studio
 does not discover the model, enter the ID manually. Verify the final request URL
 is `/v1/chat/completions`; base-URL suffix behavior still needs a live UI test.
 Select this custom provider for chat, leaving local Gemma loaded for inference.
-Do not configure Studio's inference API to route `STUDIO_MODEL` to this provider.
+Do not route Studio's local inference back through this provider.
 
 The connector advertises `msp` regardless of the underlying local model. The old
 `msp-gemma` ID remains accepted for existing connections/chats, but is not listed
 in discovery. To adopt the new name, restart the bridge, edit the Studio connection,
 refresh its model list (or enter `msp` manually), and enable/select `msp`. Update
 managed users' model allowlists to include `msp` where applicable. Keep the old ID
-enabled in Studio if existing chats still reference it. `STUDIO_MODEL` continues
-to name the actual local inference model; no inference/model-load settings change.
+enabled in Studio if existing chats still reference it. The underlying model is
+discovered automatically from Studio, independently of this connector alias.
 
 `GET /health` checks only that the bridge is running. Loopback
-`GET /v1/models` advertises its model and discovers the configured local model's
+`GET /v1/models` advertises its model and discovers the single loaded local model's
 active context from Studio's `/api/inference/loaded-models`. It reports that
 capacity as `max_model_len` (used by US's custom-provider context discovery) and
 `context_length` (model-list metadata). Native/training capacity and unrelated or
 unloaded models are not used. The lookup does not load a model or run inference.
 
-Discovery uses the same validated Studio URL/model/API key as inference. Successful
+Discovery uses the same validated Studio URL/API key and loaded-model selection rule as inference. Successful
 lookups are cached for 30 seconds and unsuccessful lookups for 5 seconds. If Studio
 is unavailable, unauthorized, unconfigured, or reports no active window, discovery
 still lists `msp` but omits context metadata rather than guessing or retaining
@@ -257,6 +259,22 @@ This is an editable memory label, not an authenticated US account ID. It is not
 used for authorization or evidence storage. It also does not identify a chat.
 The test verifies whether account memory reaches MSP; it does not yet establish
 cross-user access control or hidden-evidence persistence.
+
+## Automatic model selection update (2026-10-24)
+
+Removed the `STUDIO_MODEL` setting. Normal inference requests query Studio's
+loaded-model endpoint directly and pin its single loaded model for the whole
+request. No model or multiple loaded models return HTTP 503; MSP never guesses,
+loads a model, or silently changes models mid-request. Non-inference commands
+remain available. Model switches in Studio require no reload or `.env` edits.
+Context metadata retains its separate 30-second success / 5-second failure cache.
+
+Validation: 138 offline regression tests passed, including per-request model
+switching, ignoring obsolete model settings, invalid/ambiguous discovery rejection,
+context parsing and existing evidence/session/provider behavior. A live in-process
+bridge test automatically selected Studio's loaded DavidAU Qwen3.5-9B model,
+discovered its 8192-token window and returned HTTP 200 with `OK`. Restart the
+running bridge to use the updated code in Studio chats.
 
 ## Real source evidence and inspection
 

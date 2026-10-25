@@ -24,6 +24,15 @@ no Studio tool definitions, and rejects returning inference-marked requests.
 
 ## Request and answer flow
 
+Model-selection change (2026-10-24): inference no longer reads `STUDIO_MODEL`.
+Each request that needs inference obtains a fresh loaded-model list from Studio
+and pins its single loaded local model for that request. Zero or multiple loaded
+models, malformed discovery responses and provider/default identifiers fail before
+inference with HTTP 503. Switching the loaded model affects the next request;
+MSP does not silently switch midway through a research turn or auto-load models.
+The context-window discovery cache described below is separate from this live
+inference selection. See [migration steps](unsloth-setup.md#automatic-model-selection).
+
 1. Studio sends text system/user/assistant messages to MSP's
    `POST /v1/chat/completions`. Memory may appear in the system messages.
 2. The bridge creates a fresh `ChatSession`, replays supported control settings
@@ -36,7 +45,7 @@ no Studio tool definitions, and rejects returning inference-marked requests.
    initial ranking, fetch/API extraction, second-stage selection and optional
    summarization. ANSWER skips new retrieval. Ranking and summarization providers
    retain their existing configuration; not every processing stage runs on Gemma.
-5. Final answer inference goes to the same configured Studio model, with readable
+5. Final answer inference goes to the same discovered Studio model, with readable
    prior evidence and, when applicable, newly prepared sources. Source links are
    added according to MSP configuration.
 6. The bridge appends independently encoded envelopes for only the new research
@@ -74,7 +83,7 @@ reconstructed context replaces the carriers with readable passages.
 ## Context discovery and development bounds
 
 MSP's `GET /v1/models` advertises `msp` and queries Studio's
-`GET /api/inference/loaded-models` for the configured loaded model's active window.
+`GET /api/inference/loaded-models` for the single loaded local model's active window.
 It returns `max_model_len` and `context_length` when known, caching successful
 lookups for 30 seconds and failures for 5 seconds. It does not substitute native
 training capacity for the active context setting. The maximum requested output

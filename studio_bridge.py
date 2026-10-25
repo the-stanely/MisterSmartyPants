@@ -70,7 +70,7 @@ class CompletionRequest(BaseModel):
     tool_choice: str | dict | None = None
 
 
-def studio_configuration() -> tuple[str, str, str]:
+def studio_configuration() -> tuple[str, str]:
     """Use the same fixed, local inference destination for discovery and chat."""
     base = os.getenv("STUDIO_BASE_URL", "http://127.0.0.1:8888/v1").rstrip("/")
     parsed = urlsplit(base)
@@ -79,56 +79,65 @@ def studio_configuration() -> tuple[str, str, str]:
             or parsed.username or parsed.password or parsed.query or parsed.fragment
             or parsed.path != "/v1" or (parsed.port or 80) == bridge_port):
         raise ValueError("STUDIO_BASE_URL must be a local HTTP /v1 URL on a different port from MSP.")
-    model = os.getenv("STUDIO_MODEL", "").strip()
-    if not model or model == "default" or "msp" in model.lower():
-        raise ValueError("Set STUDIO_MODEL to the actual local Gemma model ID, not default or an MSP provider.")
-    return base, model, os.getenv("STUDIO_API_KEY", "").strip()
+    return base, os.getenv("STUDIO_API_KEY", "").strip()
 
 
-def _fetch_context_window(base: str, model: str, key: str) -> int | None:
+def loaded_studio_model(base: str, key: str) -> dict:
+    """Resolve once per inference request; never select a provider or auto-load."""
     headers = {"X-MSP-Inference": "1"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
-    with requests.Session() as client:
-        client.trust_env = False
-        response = client.get(base.removesuffix("/v1") + "/api/inference/loaded-models",
-                              headers=headers, timeout=(1, 2), allow_redirects=False)
-    if response.status_code != 200:
-        logger.warning("Studio context discovery returned HTTP %s", response.status_code)
-        return None
-    body = response.json()
+    try:
+        with requests.Session() as client:
+            client.trust_env = False
+            response = client.get(base.removesuffix("/v1") + "/api/inference/loaded-models",
+                                  headers=headers, timeout=(1, 2), allow_redirects=False)
+        if response.status_code != 200:
+            raise ValueError(f"Studio loaded-model discovery returned HTTP {response.status_code}.")
+        body = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith("Studio loaded-model"):
+            raise
+        raise ValueError("Studio loaded-model discovery unavailable; check Studio and its API key.") from None
     entries = body.get("data") if isinstance(body, dict) else None
     if not isinstance(entries, list):
-        return None
-    for entry in entries:
-        if not isinstance(entry, dict) or entry.get("id") != model or entry.get("loaded") is not True:
-            continue
-        meta = entry.get("meta")
-        # Prefer runtime-window metadata; never use native/training capacity or
-        # the first unrelated model in Studio's catalog as an approximation.
-        for value in (entry.get("max_model_len"),
-                      meta.get("n_ctx") if isinstance(meta, dict) else None,
-                      entry.get("context_length"), entry.get("context_window")):
-            if type(value) is int and value > 0:
-                return value
-        return None
+        raise ValueError("Studio returned an invalid loaded-model list.")
+    loaded = [entry for entry in entries if isinstance(entry, dict) and entry.get("loaded") is True]
+    if not loaded:
+        raise ValueError("No local model is loaded in Studio. Load one model before using MSP.")
+    if len(loaded) != 1:
+        raise ValueError("Multiple models are loaded in Studio. Leave exactly one local inference model loaded for MSP.")
+    model = loaded[0].get("id")
+    if not isinstance(model, str) or not model.strip() or model == "default" or "msp" in model.lower():
+        raise ValueError("Studio must report a real loaded local model, not default or an MSP provider.")
+    return loaded[0]
+
+
+def _fetch_context_window(base: str, key: str) -> int | None:
+    entry = loaded_studio_model(base, key)
+    meta = entry.get("meta")
+    for value in (entry.get("max_model_len"),
+                  meta.get("n_ctx") if isinstance(meta, dict) else None,
+                  entry.get("context_length"), entry.get("context_window")):
+        if type(value) is int and value > 0:
+            return value
     return None
 
 
 def studio_context_window() -> int | None:
     global _context_cache
     try:
-        base, model, key = studio_configuration()
+        base, key = studio_configuration()
     except ValueError:
         return None
-    cache_key = (base, model, hashlib.sha256(key.encode()).hexdigest())
+    cache_key = (base, "loaded", hashlib.sha256(key.encode()).hexdigest())
     with _discovery_lock:
         if _context_cache is not None:
             identity, expires, value = _context_cache
             if identity == cache_key and time.monotonic() < expires:
                 return value
         try:
-            value = _fetch_context_window(base, model, key)
+            value = _fetch_context_window(base, key)
         except (requests.RequestException, ValueError):
             # Never include response bodies, credentials, or exception strings.
             logger.warning("Studio context discovery unavailable; omitting the context window")
@@ -139,7 +148,9 @@ def studio_context_window() -> int | None:
 
 class StudioInference:
     def __init__(self, request: CompletionRequest):
-        self.base, self.model, self.key = studio_configuration()
+        self.base, self.key = studio_configuration()
+        self.model = loaded_studio_model(self.base, self.key)["id"]
+        msp.LLM_MODEL_CONTEXT.set(self.model)
         self.request = request
 
     def __call__(self, messages, *, num_predict=None, think=None) -> str:
@@ -199,27 +210,35 @@ CONTROL_SETTINGS = {
     "/verbose-off": {"verbose_output": False},
     "/verbose-on": {"verbose_output": True},
 }
-STUDIO_HELP = """MSP commands for Studio
+STUDIO_HELP = """## MSP commands for Studio
 
-Search only (no answer LLM):
-/search <query> — general search
-/serper <query> — Google through configured Serper
-/arxiv <query>, /wiki <query>, /hn <query>, /stack <query>
-/weather <city, state>, /news <query>, /finance <query>, /stocks <query>
-/yahoo-sports <query>
+### Search only (no answer LLM)
 
-/decider <prompt> — show the decider's decision/query without searching
-/search-on, /search-off, /search-force — control research for this chat
-/llm-on, /llm-off — enable/skip the final answer model
-/prompt-on, /prompt-off — show/hide inference prompts in replies
-/verbose-on, /verbose-off — show/hide pipeline details in replies
-/llm-reload — reload the bridge's Studio connection settings from .env
-/user [username] — show/check the user label received through Studio memory
-/evidence [show] — list retained sources, or display their full passages
-/evidence-test seed|check — test hidden-text round trips using synthetic evidence
-/? or /help — show this list
+- `/search <query>` — general search
+- `/serper <query>` — Google through configured Serper
+- `/arxiv <query>`, `/wiki <query>`, `/hn <query>`, `/stack <query>`
+- `/weather <city, state>`, `/news <query>`, `/finance <query>`, `/stocks <query>`
+- `/yahoo-sports <query>`
+
+### Chat controls
+
+- `/search-on`, `/search-off`, `/search-force` — control research for this chat
+- `/llm-on`, `/llm-off` — enable/skip the final answer model
+- `/prompt-on`, `/prompt-off` — show/hide inference prompts in replies
+- `/verbose-on`, `/verbose-off` — show/hide pipeline details in replies
+- `/llm-reload` — reload the bridge's Studio connection settings from `.env`
+
+### Inspection and testing
+
+- `/decider <prompt>` — show the decider's decision/query without searching
+- `/user [username]` — show/check the user label received through Studio memory
+- `/evidence` — list retained sources and context sizes
+- `/evidence show` — also display the full retained source passages
+- `/evidence-test seed|check` — test hidden-text round trips using synthetic evidence
+- `/?` or `/help` — show this list
 
 Settings apply to this chat while Studio includes its command history.
+
 Create/manage chats and control scrolling in Studio's UI.
 Lock and unlock commands are not used here.
 """

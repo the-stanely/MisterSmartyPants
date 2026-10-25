@@ -52,7 +52,7 @@
 <text x="1164" y="279" class="body">Example: Gemma 4 E4B GGUF</text>
 <text x="1164" y="308" class="body">Same model for decider + answer</text>
 <text x="1164" y="337" class="body">POST /v1/chat/completions</text>
-<text x="1164" y="366" class="body">STUDIO_MODEL = real model ID</text>
+<text x="1164" y="366" class="body">Auto-select loaded local model</text>
 <text x="1164" y="395" class="body">Never msp or default</text>
 <text x="1164" y="424" class="body">No tools / provider recursion</text>
 <path d="M1028 433 H1090 V300 H1140" fill="none" stroke="#234769" stroke-width="2.5" marker-end="url(#arrow)"/>

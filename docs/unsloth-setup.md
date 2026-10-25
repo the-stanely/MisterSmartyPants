@@ -64,18 +64,17 @@ From the repository root, install/update MSP's environment:
 ```
 
 For a new checkout only, copy `.env.example` to `.env`. If `.env` already exists,
-keep it and its search configuration/prompts. Add or update the entries from
-[`studio-bridge.env.example`](../studio-bridge.env.example):
+keep it and its search configuration/prompts. All three interfaces use the single
+[`.env.example`](../.env.example) template. Add or update its Studio bridge entries:
 
 ```dotenv
 MSP_BRIDGE_PORT=8081
 MSP_BRIDGE_API_KEY=
 STUDIO_BASE_URL=http://127.0.0.1:8888/v1
 STUDIO_API_KEY=
-STUDIO_MODEL=unsloth/gemma-4-E4B-it-GGUF
 ```
 
-Replace `STUDIO_MODEL` with the exact ID from step 2. Put the Studio inference key
+Load exactly one local inference model in Studio. Put the Studio inference key
 in `STUDIO_API_KEY` if required; otherwise leave it blank. Do not commit `.env`.
 Ensure `SEARCH_DECIDER=planner` (or the existing supported `ollama` decider mode).
 The Python decider is unsupported by this bridge. The Studio inference override
@@ -121,11 +120,32 @@ needed. The legacy ID `msp-gemma` is still accepted for existing chats. Disable
 Studio tools/MCP for this provider; MSP handles research. Choose Chat Completions,
 not Responses or System One (decisions).
 
-**Avoid a routing loop:** Studio chat selects `msp`, but MSP's `STUDIO_MODEL`
-must identify the real on-device Gemma. `STUDIO_BASE_URL` must point to Studio
+**Avoid a routing loop:** Studio chat selects `msp`, while MSP discovers the
+actual loaded local model through Studio?s loaded-model API. `STUDIO_BASE_URL` must point to Studio
 on 8888, never back to MSP on 8081. Do not unload Gemma when selecting the connector.
 
 ## 5. Verify discovery and chat
+
+### Automatic model selection
+
+Manage the inference model entirely in Studio. MSP calls
+`GET /api/inference/loaded-models` at the start of each normal chat request and
+requires exactly one entry marked `loaded: true`. It pins that model ID for every
+inference call in the request, including planning, query rewriting and the answer.
+The lookup is live and does not use the context-discovery cache. It does not load
+a model or select the `msp` connector as an inference destination.
+
+Switch models by unloading the previous local model and loading the replacement
+in Studio, then send the next chat message through `msp`. No `.env` change,
+`/llm-reload` or bridge restart is required for a model switch. Do not unload the
+model while a request is in progress; a mid-request unload can fail that request.
+No model or multiple loaded models produce a clear HTTP 503 instead of a guess.
+Help and other non-inference commands remain usable without a loaded model.
+
+Migration: remove the old `STUDIO_MODEL` assignment from an existing `.env`.
+It is no longer read, including explicit IDs or `auto`. The bridge key, Studio API
+key and Studio base URL retain their existing meanings. Console/browser model
+selection through Ollama or OpenRouter is unchanged.
 
 With the bridge key blank:
 
@@ -186,13 +206,13 @@ not needed for evidence retention. Evidence follows the actual conversation.
 | --- | --- |
 | Connector cannot connect | Studio and the bridge are running; connector uses port 8081 with `/v1`, correct API type and matching bridge key if configured. |
 | Studio returns 401 / MSP returns an inference error | `STUDIO_API_KEY` matches Studio's inference key, or keyless chat/inference is enabled and permitted for the current account setup. |
-| `Set STUDIO_MODEL ... not default or an MSP provider` | Use the real loaded model ID from Studio's `/v1/models`. |
+| No local model / multiple loaded models | Load exactly one local inference model in Studio. MSP will not guess or load a model itself. |
 | Busy / HTTP 429 | The prototype runs one MSP pipeline at a time; retry after the other request finishes. |
 | Missing/stale context window | Verify the loaded model's active window, API access and exact ID; allow discovery caches to expire. |
 | `/evidence` shows no sources | A successful normal research turn must occur after this feature was installed. Old chats, raw slash-search results, or trimmed-away payloads may have no evidence. |
 | Long search times out in Studio | The bridge buffers responses until complete and sends no heartbeat. Review provider timeout and retrieval timing. |
 
-After changing Studio connection/model variables in `.env`, `/llm-reload` reloads
+After changing Studio URL/key variables in `.env`, `/llm-reload` reloads
 them and clears discovery cache; it does not load a model. Restart the bridge for
 code changes or port changes. Stop it with Ctrl+C. Studio's on-device chat works
 independently when the bridge is stopped.

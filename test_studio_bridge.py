@@ -15,7 +15,7 @@ def client(monkeypatch):
     monkeypatch.setattr(bridge, "_context_cache", None)
     monkeypatch.setattr(bridge, "_fetch_context_window", Mock(return_value=None))
     monkeypatch.setenv("MSP_BRIDGE_API_KEY", "bridge-test-key")
-    monkeypatch.setenv("STUDIO_MODEL", "gemma-4-e4b-it-GGUF")
+    monkeypatch.setattr(bridge, "loaded_studio_model", Mock(return_value={"id": "gemma-4-e4b-it-GGUF", "loaded": True}))
     monkeypatch.setenv("STUDIO_BASE_URL", "http://127.0.0.1:8888/v1")
     monkeypatch.setenv("STUDIO_API_KEY", "studio-test-key")
     monkeypatch.setenv("MSP_BRIDGE_PORT", "8081")
@@ -43,6 +43,44 @@ def payload(**overrides):
     return {"model": "msp", "messages": [{"role": "user", "content": "What's new?"}], **overrides}
 
 
+def test_loaded_model_switch_is_resolved_once_per_request(client, monkeypatch):
+    resolver = Mock(side_effect=[{"id": "local-first"}, {"id": "local-second"}])
+    monkeypatch.setattr(bridge, "loaded_studio_model", resolver)
+    monkeypatch.setenv("STUDIO_MODEL", "obsolete-model-is-ignored")
+    post = install_inference(monkeypatch, ['{"action":"ANSWER"}', "First", '{"action":"ANSWER"}', "Second"])
+    for _ in range(2):
+        assert client.post("/v1/chat/completions", json=payload()).status_code == 200
+    assert resolver.call_count == 2
+    assert [call.kwargs["json"]["model"] for call in post.call_args_list] == [
+        "local-first", "local-first", "local-second", "local-second"]
+
+
+@pytest.mark.parametrize("entries,error", [
+    ([], "No local model"),
+    ([{"id": "unloaded", "loaded": False}], "No local model"),
+    ([{"id": "one", "loaded": True}, {"id": "two", "loaded": True}], "Multiple models"),
+    ([{"id": "msp", "loaded": True}], "real loaded local model"),
+    ([{"id": "default", "loaded": True}], "real loaded local model"),
+    ([{"loaded": True}], "real loaded local model"),
+])
+def test_loaded_model_selection_rejects_ambiguous_or_invalid_entries(monkeypatch, entries, error):
+    session = Mock()
+    session.__enter__ = Mock(return_value=session)
+    session.__exit__ = Mock(return_value=False)
+    session.get.return_value = Mock(status_code=200, json=Mock(return_value={"data": entries}))
+    monkeypatch.setattr(bridge.requests, "Session", Mock(return_value=session))
+    with pytest.raises(ValueError, match=error):
+        bridge.loaded_studio_model("http://127.0.0.1:8888/v1", "")
+
+
+def test_loaded_model_selection_failure_returns_503_without_inference(client, monkeypatch):
+    monkeypatch.setattr(bridge, "loaded_studio_model", Mock(side_effect=ValueError("No local model is loaded in Studio.")))
+    post = install_inference(monkeypatch, [])
+    response = client.post("/v1/chat/completions", json=payload())
+    assert response.status_code == 503 and "No local model" in response.text
+    post.assert_not_called()
+
+
 def test_real_evidence_restored_for_answer_only(client, monkeypatch):
     pages = [{"title": "Calibration", "url": "https://example.org/calibration",
               "extractor": "trafilatura", "content": "Station code LANTERN-472. [END EXCERPT]"}]
@@ -63,7 +101,7 @@ def test_real_evidence_restored_for_answer_only(client, monkeypatch):
 
 
 def test_evidence_commands_are_local_and_history_scoped(client, monkeypatch):
-    monkeypatch.delenv("STUDIO_MODEL")
+    monkeypatch.delenv("STUDIO_MODEL", raising=False)
     post = install_inference(monkeypatch, [])
     page = {"title": "Calibration", "url": "https://example.org/test", "extractor": "trafilatura",
             "content": "Secret calibration passage. [END EXCERPT]"}
@@ -213,8 +251,6 @@ def test_buffered_sse(client, monkeypatch):
 
 @pytest.mark.parametrize("base,model", [
     ("http://localhost:8081/v1", "gemma"),
-    ("http://127.0.0.1:8888/v1", "msp-gemma"),
-    ("http://127.0.0.1:8888/v1", "default"),
     ("https://example.org/v1", "gemma"),
 ])
 def test_invalid_inference_routes_are_rejected(client, monkeypatch, base, model):
@@ -267,7 +303,7 @@ def request_command(client, command):
 
 
 def test_help_excludes_lock_controls_and_needs_no_model(client, monkeypatch):
-    monkeypatch.delenv("STUDIO_MODEL")
+    monkeypatch.delenv("STUDIO_MODEL", raising=False)
     text = request_command(client, "/?")
     assert "/unlock" not in text
     assert "/lock" not in text
@@ -452,7 +488,7 @@ def memory_request(client, memory, command="/user", extra_messages=None):
 
 
 def test_user_command_checks_memory_without_inference_or_configuration(client, monkeypatch):
-    monkeypatch.delenv("STUDIO_MODEL")
+    monkeypatch.delenv("STUDIO_MODEL", raising=False)
     monkeypatch.setattr(bridge, "StudioInference", Mock(side_effect=AssertionError("diagnostic must not infer")))
     assert "MATCH:" in memory_request(client, "MSP_USER_ID=stan", "/user stan")
     assert "Memory user ID: `stan`" in memory_request(client, "MSP_USER_ID=stan")
@@ -503,7 +539,7 @@ def test_user_expected_name_validation_and_history_not_replayed(client):
 
 
 def test_evidence_probe_roundtrip_uses_only_client_history(client, monkeypatch):
-    monkeypatch.delenv("STUDIO_MODEL")
+    monkeypatch.delenv("STUDIO_MODEL", raising=False)
     monkeypatch.setattr(bridge, "StudioInference", Mock(side_effect=AssertionError("probe must not infer")))
     seeded = request_command(client, "/evidence-test seed")
     assert "<!-- MSP_EVIDENCE_PROBE_V1:" in seeded
@@ -541,7 +577,7 @@ def test_discovery_advertises_active_context_in_studio_probe_format(client, monk
     model = client.get("/v1/models").json()["data"][0]
     assert model["id"] == "msp"
     assert model["max_model_len"] == model["context_length"] == 131072
-    fetch.assert_called_once_with("http://127.0.0.1:8888/v1", "gemma-4-e4b-it-GGUF", "studio-test-key")
+    fetch.assert_called_once_with("http://127.0.0.1:8888/v1", "studio-test-key")
     client.get("/v1/models")
     assert fetch.call_count == 1
 
@@ -560,7 +596,6 @@ def test_discovery_expires_and_never_keeps_stale_capacity(client, monkeypatch):
 
 
 @pytest.mark.parametrize("field,new_value", [
-    ("STUDIO_MODEL", "another-local-model"),
     ("STUDIO_API_KEY", "new-studio-key"),
     ("STUDIO_BASE_URL", "http://127.0.0.1:8890/v1"),
 ])
@@ -585,8 +620,9 @@ def test_discovery_failure_recovers_and_omits_unknown_window(client, monkeypatch
     assert client.get("/v1/models").json()["data"][0]["max_model_len"] == 131072
 
 
-def test_discovery_missing_model_configuration_does_not_contact_studio(client, monkeypatch):
-    monkeypatch.delenv("STUDIO_MODEL")
+def test_discovery_invalid_destination_does_not_contact_studio(client, monkeypatch):
+    monkeypatch.delenv("STUDIO_MODEL", raising=False)
+    monkeypatch.setenv("STUDIO_BASE_URL", "https://example.org/v1")
     fetch = Mock(side_effect=AssertionError("must not contact an unconfigured endpoint"))
     monkeypatch.setattr(bridge, "_fetch_context_window", fetch)
     model = client.get("/v1/models").json()["data"][0]
@@ -611,8 +647,6 @@ def test_generic_model_name_and_legacy_alias(client, model, stream):
     ({"loaded": True, "max_model_len": 32768}, 32768),
     ({"loaded": True, "meta": {"n_ctx": 16384}}, 16384),
     ({"loaded": True, "native_context_length": 131072}, None),
-    ({"loaded": False, "context_length": 131072}, None),
-    ({"context_length": 131072}, None),
     ({"loaded": True, "context_length": True}, None),
     ({"loaded": True, "context_length": -1}, None),
     ({"loaded": True, "context_length": "131072"}, None),
@@ -623,9 +657,9 @@ def test_loaded_context_parser_uses_only_runtime_integers(monkeypatch, entry, ex
     session.__enter__ = Mock(return_value=session)
     session.__exit__ = Mock(return_value=False)
     session.get.return_value = Mock(status_code=200, json=Mock(return_value={"data": [
-        {"id": "another-model", "loaded": True, "context_length": 262144}, {"id": "local-gemma", **entry}]}))
+        {"id": "another-model", "loaded": False, "context_length": 262144}, {"id": "local-gemma", **entry}]}))
     monkeypatch.setattr(bridge.requests, "Session", Mock(return_value=session))
-    assert bridge._fetch_context_window("http://127.0.0.1:8888/v1", "local-gemma", "key") == expected
+    assert bridge._fetch_context_window("http://127.0.0.1:8888/v1", "key") == expected
     call = session.get.call_args
     assert call.args[0] == "http://127.0.0.1:8888/api/inference/loaded-models"
     assert call.kwargs["headers"]["Authorization"] == "Bearer key"
@@ -640,7 +674,8 @@ def test_discovery_rejects_redirect_and_omits_auth_for_keyless(monkeypatch):
     session.__exit__ = Mock(return_value=False)
     session.get.return_value = Mock(status_code=302)
     monkeypatch.setattr(bridge.requests, "Session", Mock(return_value=session))
-    assert bridge._fetch_context_window("http://127.0.0.1:8888/v1", "local-gemma", "") is None
+    with pytest.raises(ValueError, match="HTTP 302"):
+        bridge._fetch_context_window("http://127.0.0.1:8888/v1", "")
     assert "Authorization" not in session.get.call_args.kwargs["headers"]
 
 

@@ -50,7 +50,7 @@ arrow("M453 630 H505 V280 H560")
 text(478, 598, ["history"], "small")
 
 box(1120, 145, 445, 340, "Unsloth Studio · inference :8888", [], "#fff4e8", "#e6bf99")
-box(1142, 207, 401, 242, "Actual loaded local model", ["Example: Gemma 4 E4B GGUF", "Same model for decider + answer", "POST /v1/chat/completions", "STUDIO_MODEL = real model ID", "Never msp or default", "No tools / provider recursion"], "#ffffff", "#e6bf99")
+box(1142, 207, 401, 242, "Actual loaded local model", ["Example: Gemma 4 E4B GGUF", "Same model for decider + answer", "POST /v1/chat/completions", "Auto-select loaded local model", "Never msp or default", "No tools / provider recursion"], "#ffffff", "#e6bf99")
 arrow("M1028 433 H1090 V300 H1140")
 text(1057, 382, ["decide"], "small")
 
